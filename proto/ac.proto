@@ -1,0 +1,42 @@
+syntax = "proto3";
+package ac;
+
+option go_package = "./proto";
+
+service ACService {
+  // 核心同步接口：接收远程更新
+  rpc PropagateUpdate (stream UpdateMessage) returns (stream UpdateAck);
+  // 接收配置变更（OCA模块下发）
+  rpc ChangeConsistencyLevel (CLConfig) returns (Ack);
+}
+
+message UpdateMessage {
+  string key = 1;           // 状态ID，例如 "link_1001_bw"
+  string origin_node_id = 2; // 发起节点ID
+  int64 timestamp = 3;       // 纳秒级时间戳
+  Operation op = 4;          // 操作类型
+  double value = 5;          // 变更值
+  string update_id = 6;      // 更新唯一标识符
+}
+
+enum Operation {
+  INCREMENT = 0;
+  DECREMENT = 1;
+}
+
+message CLConfig {
+  string key = 1;
+  int32 max_queue_size = 2; // CL_QS
+  int32 timeout_ms = 3;     // CL_TO
+}
+
+message Ack {
+  bool success = 1;
+  string message = 2;
+}
+
+message UpdateAck {
+  string key = 1;
+  string update_id = 2; // 用于确认具体哪次更新
+  bool success = 3;
+}
