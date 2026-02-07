@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/your-org/ac/proto"
+	"github.com/weufhsos/adaptive_sync_go/proto"
 )
 
 // ConsistencyLevel 一致性级别配置

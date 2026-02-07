@@ -6,12 +6,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/your-org/ac/dispatcher"
-	"github.com/your-org/ac/oca"
-	"github.com/your-org/ac/pi"
-	"github.com/your-org/ac/proto"
-	"github.com/your-org/ac/store"
-	"github.com/your-org/ac/transport"
+	"github.com/weufhsos/adaptive_sync_go/dispatcher"
+	"github.com/weufhsos/adaptive_sync_go/oca"
+	"github.com/weufhsos/adaptive_sync_go/pi"
+	"github.com/weufhsos/adaptive_sync_go/proto"
+	"github.com/weufhsos/adaptive_sync_go/store"
+	"github.com/weufhsos/adaptive_sync_go/transport"
 )
 
 // Config AC模块配置

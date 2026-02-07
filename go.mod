@@ -1,4 +1,4 @@
-module github.com/your-org/ac
+module github.com/weufhsos/adaptive_sync_go
 
 go 1.24.3
 

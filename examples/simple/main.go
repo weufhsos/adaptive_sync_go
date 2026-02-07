@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/your-org/ac"
+	"github.com/weufhsos/adaptive_sync_go"
 )
 
 func main() {

@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/your-org/ac/store"
+	"github.com/weufhsos/adaptive_sync_go/store"
 )
 
 // InconsistencyReport 不一致性报告
@@ -57,7 +57,15 @@ func (i *Inspector) Start() {
 // Stop 停止检查器
 func (i *Inspector) Stop() {
 	log.Printf("[PI] Stopping Performance Inspector")
-	close(i.stopChan)
+
+	// 避免重复关闭channel
+	select {
+	case <-i.stopChan:
+		// 已经关闭了
+	default:
+		close(i.stopChan)
+	}
+
 	<-i.stoppedChan
 	log.Printf("[PI] Performance Inspector stopped")
 }

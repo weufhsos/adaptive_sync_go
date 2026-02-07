@@ -3,11 +3,51 @@ package ac
 import (
 	"time"
 
-	"github.com/your-org/ac/dispatcher"
+	"github.com/weufhsos/adaptive_sync_go/dispatcher"
 )
 
 // options.go 实现Functional Options Pattern
 // 提供灵活的配置选项机制
+
+// ========== 基础配置选项 ==========
+
+// WithNodeID 设置节点ID
+func WithNodeID(id string) Option {
+	return func(c *Config) {
+		c.NodeID = id
+	}
+}
+
+// WithPeers 设置对等节点地址
+func WithPeers(addrs []string) Option {
+	return func(c *Config) {
+		c.PeerAddresses = addrs
+	}
+}
+
+// WithGRPCPort 设置gRPC端口
+func WithGRPCPort(port int) Option {
+	return func(c *Config) {
+		c.GRPCPort = port
+	}
+}
+
+// WithTargetPhi 设置目标不一致性比率
+func WithTargetPhi(phi float64) Option {
+	return func(c *Config) {
+		c.TargetPhi = phi
+	}
+}
+
+// WithInitialCL 设置初始一致性级别
+func WithInitialCL(qs int, timeout time.Duration) Option {
+	return func(c *Config) {
+		c.InitialCL = dispatcher.ConsistencyLevel{
+			QueueSize: qs,
+			Timeout:   timeout,
+		}
+	}
+}
 
 // ========== 预设配置模板 ==========
 

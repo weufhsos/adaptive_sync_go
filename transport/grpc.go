@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	"github.com/your-org/ac/proto"
+	"github.com/weufhsos/adaptive_sync_go/proto"
 )
 
 // GRPCServer gRPC服务端实现

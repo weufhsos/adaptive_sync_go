@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/your-org/ac/dispatcher"
+	"github.com/weufhsos/adaptive_sync_go/dispatcher"
 )
 
 // Controller 实现论文中的Algorithm 4: PID-based CL Adaptation
