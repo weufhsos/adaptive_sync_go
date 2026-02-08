@@ -186,17 +186,28 @@ func (g *RequestGenerator) sendRequest(id int) {
 		Bandwidth:  bandwidth,
 	}
 
-	// 发送请求（使用全局带宽，用于AC一致性测试）
+	// 发送请求（使用全局资源模式，确保所有节点操作同一个AC key）
 	startTime := time.Now()
-	allocReq := map[string]interface{}{
-		"bandwidth":    bandwidth,
-		"hold_time_ms": holdTime.Milliseconds(),
-		"use_global":   true, // 使用全局共享状态，让多个节点操作同一个key
+	cost := bandwidth // 使用bandwidth作为cost值
+	durationMs := holdTime.Milliseconds()
+	embedReq := map[string]interface{}{
+		"cost":         cost,
+		"duration_ms":  durationMs,
+		"use_global":   true, // 关键：使用全局状态，让所有节点操作同一个key
 	}
-	log.Printf("[LoadGen] Sending request to %s: use_global=true, bandwidth=%.2f", targetNode, bandwidth)
+	
+	body, err := json.Marshal(embedReq)
+	if err != nil {
+		log.Printf("[LoadGen] Failed to marshal request: %v", err)
+		result.Success = false
+		result.Error = err.Error()
+		return
+	}
+	
+	log.Printf("[LoadGen] Sending embed request to %s: cost=%.2f%%, duration=%dms, use_global=true, body=%s", 
+		targetNode, cost, durationMs, string(body))
 
-	body, _ := json.Marshal(allocReq)
-	url := fmt.Sprintf("http://%s/api/v1/allocate", targetNode)
+	url := fmt.Sprintf("http://%s/api/v1/embed", targetNode)
 
 	resp, err := g.client.Post(url, "application/json", bytes.NewReader(body))
 	result.Latency = time.Since(startTime)
@@ -212,11 +223,17 @@ func (g *RequestGenerator) sendRequest(id int) {
 			result.Success = true
 			atomic.AddInt64(&g.stats.Successful, 1)
 
-			// 解析响应获取分配的链路
-			var allocResp map[string]interface{}
-			if json.NewDecoder(resp.Body).Decode(&allocResp) == nil {
-				if linkID, ok := allocResp["link_id"].(string); ok {
-					result.AllocatedOn = linkID
+			// 解析响应获取分配的服务器
+			var embedResp map[string]interface{}
+			if json.NewDecoder(resp.Body).Decode(&embedResp) == nil {
+				if serverID, ok := embedResp["server_id"].(string); ok {
+					result.AllocatedOn = serverID
+				}
+				// 同时尝试旧格式（向后兼容）
+				if result.AllocatedOn == "" {
+					if linkID, ok := embedResp["link_id"].(string); ok {
+						result.AllocatedOn = linkID
+					}
 				}
 			}
 		} else {

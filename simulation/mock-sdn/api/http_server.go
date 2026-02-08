@@ -118,7 +118,15 @@ func (s *Server) Stop() {
 func (s *Server) handleEmbed(w http.ResponseWriter, r *http.Request) {
 	var req EmbedRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("[API] Failed to decode request: %v", err)
 		s.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	// 验证请求参数
+	if req.Cost <= 0 {
+		log.Printf("[API] Invalid cost: %.2f, rejecting request", req.Cost)
+		s.respondError(w, http.StatusBadRequest, "Invalid cost: must be > 0")
 		return
 	}
 
