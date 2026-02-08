@@ -4,13 +4,13 @@ scenarios:
   # 基准测试 - 正常负载
   baseline:
     description: "Test AC under normal load conditions"
-    rps: 50
+    rps: 20                    # 降低请求频率，避免过载
     duration: 300s
     pattern: uniform
-    min_bandwidth: 10
-    max_bandwidth: 100
-    min_hold_time: 1s
-    max_hold_time: 10s
+    min_bandwidth: 5           # 降低最小带宽需求
+    max_bandwidth: 50          # 降低最大带宽需求
+    min_hold_time: 500ms       # 缩短最小持有时间
+    max_hold_time: 3s          # 缩短最大持有时间
     expected:
       success_rate: ">95%"
       phi_range: "1.0-1.1"

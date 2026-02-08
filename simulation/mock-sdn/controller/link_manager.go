@@ -59,20 +59,29 @@ func NewLinkManager(
 		globalStateKey: "global_shared_bandwidth",
 	}
 
-	// 为每个对等节点创建链路管理
-	for _, peer := range peers {
-		linkID := fmt.Sprintf("link_%s_to_%s", nodeID, peer)
-		stateKey := fmt.Sprintf("link_%s_available", linkID)
+	// 构建所有节点列表（包括自己）
+	allNodes := append([]string{nodeID}, peers...)
 
-		lm.links[linkID] = &ManagedLink{
-			ID:           linkID,
-			TargetNodeID: peer,
-			Capacity:     capacity,
-			StateKey:     stateKey,
+	// 创建全局链路视图：所有节点对之间的链路
+	// 每个节点都知道并能操作全网所有链路
+	for _, srcNode := range allNodes {
+		for _, dstNode := range allNodes {
+			if srcNode == dstNode {
+				continue // 跳过自环
+			}
+			linkID := fmt.Sprintf("link_%s_to_%s", srcNode, dstNode)
+			stateKey := fmt.Sprintf("link_%s_available", linkID)
+
+			lm.links[linkID] = &ManagedLink{
+				ID:           linkID,
+				TargetNodeID: dstNode,
+				Capacity:     capacity,
+				StateKey:     stateKey,
+			}
 		}
 	}
 
-	log.Printf("[LinkManager] Created with %d links", len(lm.links))
+	log.Printf("[LinkManager] Created global view with %d links (all node pairs)", len(lm.links))
 	return lm
 }
 
@@ -81,11 +90,17 @@ func (lm *LinkManager) InitializeLinks() {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
-	// 初始化每个链路的本地状态
+	// 只初始化本节点"拥有"的出链路（避免多个节点重复初始化同一链路）
+	ownLinksCount := 0
 	for linkID, link := range lm.links {
+		// 只初始化以本节点为源的链路
+		if !isOwnLink(linkID, lm.nodeID) {
+			continue
+		}
 		if err := lm.acManager.Update(link.StateKey, lm.capacity); err != nil {
 			log.Printf("[LinkManager] Warning: failed to initialize %s: %v", linkID, err)
 		}
+		ownLinksCount++
 	}
 
 	// 初始化全局共享状态（用于AC一致性测试）
@@ -98,7 +113,14 @@ func (lm *LinkManager) InitializeLinks() {
 		log.Printf("[LinkManager] Global state '%s' initialized successfully", lm.globalStateKey)
 	}
 
-	log.Printf("[LinkManager] Initialized %d links and global state in AC", len(lm.links))
+	log.Printf("[LinkManager] Node %s initialized %d own links, knows %d total links (global view)",
+		lm.nodeID, ownLinksCount, len(lm.links))
+}
+
+// isOwnLink 判断链路是否属于本节点（以本节点为源）
+func isOwnLink(linkID, nodeID string) bool {
+	expectedPrefix := fmt.Sprintf("link_%s_to_", nodeID)
+	return len(linkID) >= len(expectedPrefix) && linkID[:len(expectedPrefix)] == expectedPrefix
 }
 
 // GetAvailableBandwidth 获取链路可用带宽
@@ -247,7 +269,7 @@ func (lm *LinkManager) AllocateGlobalBandwidth(amount float64) error {
 	log.Printf("[LinkManager] Allocating from global state '%s': amount=%.2f", lm.globalStateKey, amount)
 	available := lm.acManager.Get(lm.globalStateKey)
 	log.Printf("[LinkManager] Global state '%s' available: %.2f", lm.globalStateKey, available)
-	
+
 	if available < amount {
 		return fmt.Errorf("insufficient global bandwidth: requested %.2f, available %.2f", amount, available)
 	}
