@@ -129,10 +129,10 @@ services:
       - RPS=5
       - DURATION=300s
       - PATTERN=uniform
-      - MIN_COST=5        # 最小资源需求 5%
-      - MAX_COST=20       # 最大资源需求 20%
-      - MIN_DURATION=1s   # 最短持有时间
-      - MAX_DURATION=5s   # 最长持有时间
+      - MIN_BANDWIDTH=5       # 最小资源需求 5%
+      - MAX_BANDWIDTH=20      # 最大资源需求 20%
+      - MIN_HOLD_TIME=1s      # 最短持有时间
+      - MAX_HOLD_TIME=5s      # 最长持有时间
     depends_on:
       sdn-1:
         condition: service_healthy

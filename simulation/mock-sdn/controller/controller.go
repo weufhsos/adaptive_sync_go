@@ -48,6 +48,11 @@ func NewSDNController(
 	// 创建服务器管理器（替代链路管理器）
 	serverManager := NewServerManager(acManager, netSim, serverCapacity, serverList, nodeID)
 
+	// 在模拟器中注册服务器，使其能追踪服务器负载
+	for _, serverID := range serverList {
+		netSim.RegisterServer(serverID, serverCapacity)
+	}
+
 	ctrl := &SDNController{
 		nodeID:        nodeID,
 		acManager:     acManager,

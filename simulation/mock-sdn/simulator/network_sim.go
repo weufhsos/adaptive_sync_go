@@ -182,6 +182,24 @@ func (sim *NetworkSim) GetAllLinks() map[string]*LinkState {
 	return result
 }
 
+// RegisterServer 注册服务器到模拟器（使其可以追踪服务器负载）
+func (sim *NetworkSim) RegisterServer(serverID string, capacity float64) {
+	sim.mu.Lock()
+	defer sim.mu.Unlock()
+
+	if _, exists := sim.links[serverID]; !exists {
+		sim.links[serverID] = &LinkState{
+			ID:             serverID,
+			Capacity:       capacity,
+			BaseLoad:       0,
+			CurrentLoad:    0,
+			Latency:        1.0,
+			LastUpdateTime: time.Now(),
+		}
+		log.Printf("[NetworkSim] Registered server: %s (capacity=%.0f%%)", serverID, capacity)
+	}
+}
+
 // AddExternalLoad 添加外部负载（来自带宽分配）
 func (sim *NetworkSim) AddExternalLoad(linkID string, amount float64) error {
 	sim.mu.Lock()

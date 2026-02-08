@@ -170,9 +170,11 @@ func (s *Server) handleEmbed(w http.ResponseWriter, r *http.Request) {
 			if req.UseGlobal {
 				s.controller.ReleaseGlobalResources(req.Cost)
 			} else {
-				// TODO: 实现 ReleaseServer 方法
-				// s.controller.ReleaseServer(serverID, req.Cost)
-				log.Printf("[API] Auto-release scheduled for server %s: %.2f%%", serverID, req.Cost)
+				if err := s.controller.ReleaseServer(serverID, req.Cost); err != nil {
+					log.Printf("[API] Auto-release failed for server %s: %v", serverID, err)
+				} else {
+					log.Printf("[API] Auto-released %.2f%% on server %s", req.Cost, serverID)
+				}
 			}
 		}()
 	}
@@ -182,11 +184,9 @@ func (s *Server) handleEmbed(w http.ResponseWriter, r *http.Request) {
 	if req.UseGlobal {
 		remaining = s.controller.GetGlobalAvailable()
 	} else {
-		// TODO: 实现 GetServerStatus 方法
-		// if status, err := s.controller.GetServerStatus(serverID); err == nil {
-		// 	remaining = status.Available
-		// }
-		remaining = 100.0 - req.Cost // 临时值
+		if status, err := s.controller.GetServerStatus(serverID); err == nil {
+			remaining = status.Available
+		}
 	}
 
 	s.respondJSON(w, http.StatusOK, EmbedResponse{
@@ -207,18 +207,17 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: 实现 ReleaseServer 方法
-	// if err := s.controller.ReleaseServer(req.ServerID, req.Cost); err != nil {
-	// 	s.respondError(w, http.StatusInternalServerError, err.Error())
-	// 	return
-	// }
+	// 释放服务器资源
+	if err := s.controller.ReleaseServer(req.ServerID, req.Cost); err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
-	// 临时实现：仅记录日志
-	log.Printf("[API] Release request: server_id=%s, cost=%.2f%% (not implemented yet)", req.ServerID, req.Cost)
+	log.Printf("[API] Release request: server_id=%s, cost=%.2f%%", req.ServerID, req.Cost)
 
 	s.respondJSON(w, http.StatusOK, map[string]interface{}{
 		"success":   true,
-		"message":   "Resource release scheduled",
+		"message":   "Resource released",
 		"server_id": req.ServerID,
 		"released":  req.Cost,
 	})
@@ -251,43 +250,21 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleGetBestServer 获取最佳服务器（替代 handleGetBestLink）
 func (s *Server) handleGetBestServer(w http.ResponseWriter, r *http.Request) {
-	// TODO: 实现 GetBestServer 方法
-	// serverID, available, err := s.controller.GetBestServer()
-	// if err != nil {
-	// 	s.respondError(w, http.StatusServiceUnavailable, err.Error())
-	// 	return
-	// }
+	serverID, available, err := s.controller.GetBestLink()
+	if err != nil {
+		s.respondError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
 
-	// 临时实现：返回固定值
 	s.respondJSON(w, http.StatusOK, map[string]interface{}{
-		"server_id": "server-1",
-		"available": 85.5,
-		"message":   "Temporary implementation",
+		"server_id": serverID,
+		"available": available,
 	})
 }
 
 // handleGetServers 获取所有服务器状态（替代 handleGetLinks）
 func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
-	// TODO: 实现 GetAllServersStatus 方法
-	// servers := s.controller.GetAllServersStatus()
-
-	// 临时实现：返回示例数据
-	servers := map[string]interface{}{
-		"server-1": map[string]interface{}{
-			"id":        "server-1",
-			"capacity":  100.0,
-			"allocated": 15.0,
-			"available": 85.0,
-			"load":      15.0,
-		},
-		"server-2": map[string]interface{}{
-			"id":        "server-2",
-			"capacity":  100.0,
-			"allocated": 30.0,
-			"available": 70.0,
-			"load":      30.0,
-		},
-	}
+	servers := s.controller.GetAllServersStatus()
 	s.respondJSON(w, http.StatusOK, servers)
 }
 
@@ -296,21 +273,12 @@ func (s *Server) handleGetServer(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	serverID := vars["id"]
 
-	// TODO: 实现 GetServerStatus 方法
-	// status, err := s.controller.GetServerStatus(serverID)
-	// if err != nil {
-	// 	s.respondError(w, http.StatusNotFound, err.Error())
-	// 	return
-	// }
-
-	// 临时实现：返回示例数据
-	status := map[string]interface{}{
-		"id":        serverID,
-		"capacity":  100.0,
-		"allocated": 25.0,
-		"available": 75.0,
-		"load":      25.0,
+	status, err := s.controller.GetServerStatus(serverID)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, err.Error())
+		return
 	}
+
 	s.respondJSON(w, http.StatusOK, status)
 }
 
