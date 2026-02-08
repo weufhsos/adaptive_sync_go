@@ -1,0 +1,40 @@
+syntax = "proto3";
+package ac;
+
+option go_package = "github.com/weufhsos/adaptive_sync_go/proto";
+
+service ACService {
+  rpc PropagateUpdate (stream UpdateMessage) returns (stream UpdateAck);
+  rpc ChangeConsistencyLevel (CLConfig) returns (Ack);
+}
+
+message UpdateMessage {
+  string key = 1;
+  string origin_node_id = 2;
+  int64 timestamp = 3;
+  Operation op = 4;
+  double value = 5;
+  string update_id = 6;
+}
+
+enum Operation {
+  INCREMENT = 0;
+  DECREMENT = 1;
+}
+
+message CLConfig {
+  string key = 1;
+  int32 max_queue_size = 2;
+  int32 timeout_ms = 3;
+}
+
+message Ack {
+  bool success = 1;
+  string message = 2;
+}
+
+message UpdateAck {
+  string key = 1;
+  string update_id = 2;
+  bool success = 3;
+}

@@ -1,0 +1,206 @@
+# version: '3.8'  # Removed obsolete version attribute
+
+services:
+  # ========== 控制平面层 - 5个SDN节点 ==========
+  sdn-1:
+    build:
+      context: ./build-context
+      dockerfile: ../mock-sdn/Dockerfile
+    container_name: sdn-1
+    environment:
+      - NODE_ID=sdn-1
+      - GRPC_PORT=50051
+      - HTTP_PORT=8080
+      - PEERS=sdn-2:50051,sdn-3:50051,sdn-4:50051,sdn-5:50051
+      - TARGET_PHI=1.05
+      - LINK_CAPACITY=1000
+    ports:
+      - "8081:8080"
+      - "50051:50051"
+    networks:
+      - sdn-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  sdn-2:
+    build:
+      context: ./build-context
+      dockerfile: ../mock-sdn/Dockerfile
+    container_name: sdn-2
+    environment:
+      - NODE_ID=sdn-2
+      - GRPC_PORT=50051
+      - HTTP_PORT=8080
+      - PEERS=sdn-1:50051,sdn-3:50051,sdn-4:50051,sdn-5:50051
+      - TARGET_PHI=1.05
+      - LINK_CAPACITY=1000
+    ports:
+      - "8082:8080"
+    networks:
+      - sdn-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  sdn-3:
+    build:
+      context: ./build-context
+      dockerfile: ../mock-sdn/Dockerfile
+    container_name: sdn-3
+    environment:
+      - NODE_ID=sdn-3
+      - GRPC_PORT=50051
+      - HTTP_PORT=8080
+      - PEERS=sdn-1:50051,sdn-2:50051,sdn-4:50051,sdn-5:50051
+      - TARGET_PHI=1.05
+      - LINK_CAPACITY=1000
+    ports:
+      - "8083:8080"
+    networks:
+      - sdn-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  sdn-4:
+    build:
+      context: ./build-context
+      dockerfile: ../mock-sdn/Dockerfile
+    container_name: sdn-4
+    environment:
+      - NODE_ID=sdn-4
+      - GRPC_PORT=50051
+      - HTTP_PORT=8080
+      - PEERS=sdn-1:50051,sdn-2:50051,sdn-3:50051,sdn-5:50051
+      - TARGET_PHI=1.05
+      - LINK_CAPACITY=1000
+    ports:
+      - "8084:8080"
+    networks:
+      - sdn-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  sdn-5:
+    build:
+      context: ./build-context
+      dockerfile: ../mock-sdn/Dockerfile
+    container_name: sdn-5
+    environment:
+      - NODE_ID=sdn-5
+      - GRPC_PORT=50051
+      - HTTP_PORT=8080
+      - PEERS=sdn-1:50051,sdn-2:50051,sdn-3:50051,sdn-4:50051
+      - TARGET_PHI=1.05
+      - LINK_CAPACITY=1000
+    ports:
+      - "8085:8080"
+    networks:
+      - sdn-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ========== 北向 - 负载生成层 ==========
+  loadgen:
+    build:
+      context: ./build-context
+      dockerfile: ../loadgen/Dockerfile
+    container_name: loadgen
+    environment:
+      - TARGET_NODES=sdn-1:8080,sdn-2:8080,sdn-3:8080,sdn-4:8080,sdn-5:8080
+      - RPS=5
+      - DURATION=300s
+      - PATTERN=uniform
+      - MIN_BANDWIDTH=10
+      - MAX_BANDWIDTH=50
+      - MIN_HOLD_TIME=5s
+      - MAX_HOLD_TIME=30s
+    depends_on:
+      sdn-1:
+        condition: service_healthy
+      sdn-2:
+        condition: service_healthy
+      sdn-3:
+        condition: service_healthy
+      sdn-4:
+        condition: service_healthy
+      sdn-5:
+        condition: service_healthy
+    networks:
+      - sdn-network
+    profiles:
+      - loadtest
+
+  # ========== 南向 - 基础设施层 ==========
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: prometheus
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - sdn-network
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: grafana
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - sdn-network
+    depends_on:
+      - prometheus
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=adminpassword
+      - DOCKER_INFLUXDB_INIT_ORG=sdn-sim
+      - DOCKER_INFLUXDB_INIT_BUCKET=metrics
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-super-secret-token
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+    networks:
+      - sdn-network
+
+networks:
+  sdn-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  grafana-data:
+  influxdb-data:

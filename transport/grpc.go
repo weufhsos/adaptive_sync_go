@@ -233,6 +233,11 @@ func (c *GRPCClient) Close() error {
 	return c.conn.Close()
 }
 
+// GetServiceClient 获取底层的gRPC服务客户端
+func (c *GRPCClient) GetServiceClient() proto.ACServiceClient {
+	return c.client
+}
+
 // PropagateUpdate 发送更新消息
 func (c *GRPCClient) PropagateUpdate(ctx context.Context, update *proto.UpdateMessage) (*proto.UpdateAck, error) {
 	// 创建流

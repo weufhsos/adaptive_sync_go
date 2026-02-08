@@ -144,7 +144,7 @@ func TestPID_Proportional(t *testing.T) {
 			t.Errorf("PID output too small for phi=%f", tc.phi)
 		}
 
-		t.Logf("Phi=%f, Error=%f, Output=%f", tc.phi, error, output)
+		t.Logf("Phi=%f, Output=%f", tc.phi, output)
 	}
 }
 

@@ -1,0 +1,24 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+alerting:
+  alertmanagers: []
+
+rule_files: []
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'sdn-nodes'
+    static_configs:
+      - targets:
+          - 'sdn-1:8080'
+          - 'sdn-2:8080'
+          - 'sdn-3:8080'
+          - 'sdn-4:8080'
+          - 'sdn-5:8080'
+    metrics_path: '/metrics'
+    scrape_interval: 2s

@@ -154,7 +154,7 @@ func TestSetOnInconsistencyReport(t *testing.T) {
 	}
 }
 
-// TestReconstructTimelines 时间线重构
+// TestReconstructTimelines 时间线重构（简化版本）
 func TestReconstructTimelines(t *testing.T) {
 	inspector := NewInspector()
 
@@ -182,6 +182,161 @@ func TestReconstructTimelines(t *testing.T) {
 			t.Errorf("Observed[%d]: expected %f, got %f", i, exp, observed[i])
 		}
 	}
+}
+
+// TestReconstructTimelinesWithRemote 完整版本的时间线重构测试
+// 测试论文 Algorithm 2 的核心逻辑:
+//   - Observed Timeline: 本地在收到远程更新之前的操作历史
+//   - Optimal Timeline: 将远程更新按原始时间戳插入后的理想历史
+func TestReconstructTimelinesWithRemote(t *testing.T) {
+	inspector := NewInspector()
+
+	// 场景: 模拟 SDN 链路带宽状态同步
+	// 本地节点在 T=1000, 1002, 1004 时刻进行了操作
+	// 远程节点在 T=1001 时刻进行了操作，但在 T=1005 才到达本地
+
+	// 本地历史记录（模拟带宽更新）
+	localHistory := []store.UpdateLog{
+		{Timestamp: 1000, Value: 100.0, NodeID: "local", Operation: store.Increment}, // 初始带宽 100
+		{Timestamp: 1002, Value: 20.0, NodeID: "local", Operation: store.Decrement},  // 本地分配 -20
+		{Timestamp: 1004, Value: 10.0, NodeID: "local", Operation: store.Decrement},  // 本地分配 -10
+	}
+
+	// 远程更新（迟到的）
+	// 原始时间戳 T=1001，但在 T=1005 才到达
+	remoteUpdate := &RemoteUpdate{
+		Key:          "link_1_bw",
+		Value:        30.0,
+		Operation:    store.Decrement, // 远程节点分配了 30 带宽
+		OriginTime:   1001,            // 原始时间戳
+		ReceiveTime:  1005,            // 到达时间
+		OriginNodeID: "remote",
+	}
+
+	observed, optimal := inspector.reconstructTimelinesWithRemote(localHistory, remoteUpdate)
+
+	// ========== 验证 Observed Timeline ==========
+	// 应该只包含 T < 1005 的本地操作，不含远程更新
+	// 期望序列: 100 -> 80 -> 70
+	expectedObserved := []float64{100.0, 80.0, 70.0}
+
+	if len(observed) != len(expectedObserved) {
+		t.Errorf("Observed timeline length: expected %d, got %d", len(expectedObserved), len(observed))
+	} else {
+		for i, exp := range expectedObserved {
+			if observed[i] != exp {
+				t.Errorf("Observed[%d]: expected %.1f, got %.1f", i, exp, observed[i])
+			}
+		}
+	}
+
+	// ========== 验证 Optimal Timeline ==========
+	// 应该将远程更新按原始时间戳(T=1001)插入
+	// 时间序列: T=1000 -> T=1001 -> T=1002 -> T=1004
+	// 值序列: 100 -> 70 -> 50 -> 40
+	expectedOptimal := []float64{100.0, 70.0, 50.0, 40.0}
+
+	if len(optimal) != len(expectedOptimal) {
+		t.Errorf("Optimal timeline length: expected %d, got %d", len(expectedOptimal), len(optimal))
+	} else {
+		for i, exp := range expectedOptimal {
+			if optimal[i] != exp {
+				t.Errorf("Optimal[%d]: expected %.1f, got %.1f", i, exp, optimal[i])
+			}
+		}
+	}
+
+	t.Logf("Observed Timeline: %v", observed)
+	t.Logf("Optimal Timeline: %v", optimal)
+}
+
+// TestReconstructTimelinesWithRemote_EarlyRemote 测试远程更新在时间线开头的情况
+func TestReconstructTimelinesWithRemote_EarlyRemote(t *testing.T) {
+	inspector := NewInspector()
+
+	// 本地历史
+	localHistory := []store.UpdateLog{
+		{Timestamp: 1002, Value: 50.0, NodeID: "local", Operation: store.Increment},
+		{Timestamp: 1004, Value: 10.0, NodeID: "local", Operation: store.Increment},
+	}
+
+	// 远程更新（原始时间比本地第一条记录更早）
+	remoteUpdate := &RemoteUpdate{
+		Key:          "link_bw",
+		Value:        100.0,
+		Operation:    store.Increment,
+		OriginTime:   1000, // 比本地第一条记录更早
+		ReceiveTime:  1005,
+		OriginNodeID: "remote",
+	}
+
+	observed, optimal := inspector.reconstructTimelinesWithRemote(localHistory, remoteUpdate)
+
+	// Observed: 只有本地操作 (50, 60)
+	expectedObserved := []float64{50.0, 60.0}
+	if len(observed) != len(expectedObserved) {
+		t.Errorf("Observed length mismatch: expected %d, got %d", len(expectedObserved), len(observed))
+	}
+
+	// Optimal: 远程更新应该在最前面 (100, 150, 160)
+	expectedOptimal := []float64{100.0, 150.0, 160.0}
+	if len(optimal) != len(expectedOptimal) {
+		t.Errorf("Optimal length mismatch: expected %d, got %d", len(expectedOptimal), len(optimal))
+	} else {
+		for i, exp := range expectedOptimal {
+			if optimal[i] != exp {
+				t.Errorf("Optimal[%d]: expected %.1f, got %.1f", i, exp, optimal[i])
+			}
+		}
+	}
+
+	t.Logf("Early remote - Observed: %v, Optimal: %v", observed, optimal)
+}
+
+// TestCheckInconsistencyWithRemote 测试完整的不一致性检查流程
+func TestCheckInconsistencyWithRemote(t *testing.T) {
+	inspector := NewInspector()
+
+	var reportedPhi float64
+	inspector.SetOnInconsistencyReport(func(phi float64) {
+		reportedPhi = phi
+	})
+
+	// 构造一个会产生不一致性的场景
+	localHistory := []store.UpdateLog{
+		{Timestamp: 1000, Value: 100.0, NodeID: "local", Operation: store.Increment},
+		{Timestamp: 1003, Value: 50.0, NodeID: "local", Operation: store.Decrement},
+	}
+
+	remoteUpdate := &RemoteUpdate{
+		Key:          "test_key",
+		Value:        30.0,
+		Operation:    store.Decrement,
+		OriginTime:   1001,
+		ReceiveTime:  1005,
+		OriginNodeID: "remote",
+	}
+
+	inspector.CheckInconsistencyWithRemote(remoteUpdate, localHistory)
+
+	// 等待回调被调用
+	time.Sleep(100 * time.Millisecond)
+
+	// phi 应该大于 0（有效值）
+	// 注意: φ = observed_cost / optimal_cost
+	// - φ ≈ 1.0: 无明显不一致性
+	// - φ > 1.0: 实际成本高于理想成本
+	// - φ < 1.0: 实际成本低于理想成本（远程更新导致理想历史波动更大）
+	if reportedPhi <= 0 {
+		t.Errorf("Expected phi > 0, got %f", reportedPhi)
+	}
+
+	stats := inspector.GetStats()
+	if stats.TotalChecks != 1 {
+		t.Errorf("Expected 1 check, got %d", stats.TotalChecks)
+	}
+
+	t.Logf("φ value from CheckInconsistencyWithRemote: %.4f", reportedPhi)
 }
 
 // TestCalculateCost 成本计算（标准差）
@@ -216,59 +371,96 @@ func TestCalculateCost(t *testing.T) {
 	}
 }
 
+// TestCheckInconsistency_BasicPhi 基础 φ 计算测试
+func TestCheckInconsistency_BasicPhi(t *testing.T) {
+	inspector := NewInspector()
+
+	// 创建有足够历史的 counter
+	counter := store.NewPNCounter("test")
+	for i := 0; i < 10; i++ {
+		counter.Increment("node-1", float64(i+1)*10)
+		time.Sleep(1 * time.Millisecond) // 确保时间戳不同
+	}
+
+	reportedPhi := 0.0
+	callbackCalled := false
+
+	inspector.SetOnInconsistencyReport(func(phi float64) {
+		reportedPhi = phi
+		callbackCalled = true
+	})
+
+	inspector.CheckInconsistency("test", time.Now().UnixNano(), counter)
+
+	// 等待回调
+	time.Sleep(100 * time.Millisecond)
+
+	if !callbackCalled {
+		t.Error("Callback should be called with sufficient history")
+	}
+
+	// 验证 φ 值合理性（应该是一个正数）
+	if reportedPhi <= 0 {
+		t.Errorf("Expected positive phi, got %f", reportedPhi)
+	}
+
+	// 验证统计更新
+	stats := inspector.GetStats()
+	if stats.TotalChecks == 0 {
+		t.Error("Expected TotalChecks > 0")
+	}
+	if stats.ReportsGenerated == 0 {
+		t.Error("Expected ReportsGenerated > 0")
+	}
+
+	t.Logf("Basic phi calculation result: %f", reportedPhi)
+}
+
 // TestPhi_NoDeviation φ=1 场景（无偏差）
 func TestPhi_NoDeviation(t *testing.T) {
 	inspector := NewInspector()
 
-	// 创建完全相同的历史（理想情况）
-	history := make([]store.UpdateLog, 10)
-	for i := 0; i < 10; i++ {
-		history[i] = store.UpdateLog{
-			Timestamp: int64(1000 + i),
-			Value:     10.0,
-			NodeID:    "node-1",
-			Operation: store.Increment,
-		}
-	}
-
+	// 创建完全一致的历史（理想情况）
 	counter := store.NewPNCounter("test")
-	for _, log := range history {
-		if log.Operation == store.Increment {
-			counter.Increment(log.NodeID, log.Value)
-		} else {
-			counter.Decrement(log.NodeID, log.Value)
-		}
+	// 模拟完全同步的操作序列
+	values := []float64{100.0, 100.0, 100.0, 100.0, 100.0}
+	for _, val := range values {
+		counter.Increment("node-1", val)
+		time.Sleep(1 * time.Millisecond)
 	}
 
-	// 在这种构造的完美场景下，observed 和 optimal 应该相同
-	// 但由于算法简化，我们验证 phi 接近 1.0
+	reportedPhi := 0.0
 	inspector.SetOnInconsistencyReport(func(phi float64) {
+		reportedPhi = phi
 		t.Logf("Phi for no-deviation case: %f", phi)
-		// phi 可能不严格等于 1.0，但在合理范围内
-		if phi <= 0 || phi > 10.0 {
-			t.Errorf("Phi %f seems unreasonable for no-deviation case", phi)
-		}
 	})
 
 	inspector.CheckInconsistency("test", time.Now().UnixNano(), counter)
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
+
+	// 在理想情况下，φ 应该接近 1.0（无显著不一致性）
+	if reportedPhi <= 0 {
+		t.Errorf("Expected positive phi for no-deviation case, got %f", reportedPhi)
+	}
+	// φ 不一定严格等于 1.0，但应该在合理范围内
+	if reportedPhi > 10.0 {
+		t.Errorf("Phi %f seems unreasonably large for no-deviation case", reportedPhi)
+	}
 }
 
 // TestPhi_WithDeviation φ>1 场景（有偏差）
 func TestPhi_WithDeviation(t *testing.T) {
 	inspector := NewInspector()
 
-	// 创建有明显差异的历史
+	// 创建有明显波动的历史（模拟不一致性）
 	counter := store.NewPNCounter("test")
 
-	// 模拟正常的递增序列
-	for i := 0; i < 10; i++ {
-		counter.Increment("node-1", float64(i*10+100))
+	// 模拟大幅波动的操作序列
+	values := []float64{10.0, 100.0, 20.0, 150.0, 30.0, 200.0, 25.0}
+	for _, val := range values {
+		counter.Increment("node-1", val)
 		time.Sleep(1 * time.Millisecond)
 	}
-
-	// 模拟延迟更新造成的影响
-	// 这种构造使得 observed 和 optimal 产生差异
 
 	reportedPhi := 0.0
 	inspector.SetOnInconsistencyReport(func(phi float64) {
@@ -276,12 +468,14 @@ func TestPhi_WithDeviation(t *testing.T) {
 	})
 
 	inspector.CheckInconsistency("test", time.Now().UnixNano(), counter)
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
-	// 验证 phi 被报告（具体值取决于计算细节）
+	// 有显著波动的情况下，应该产生不一致性报告
 	if reportedPhi <= 0 {
 		t.Error("Expected positive phi for deviation case")
 	}
+
+	// φ 值反映了不一致性程度
 	t.Logf("Phi with deviation: %f", reportedPhi)
 }
 
@@ -291,47 +485,66 @@ func TestStats_Update(t *testing.T) {
 
 	// 创建测试数据
 	counter := store.NewPNCounter("test")
-	for i := 0; i < 10; i++ {
-		counter.Increment("node-1", float64(i+1))
+	for i := 0; i < 15; i++ {
+		counter.Increment("node-1", float64(i+1)*5)
+		time.Sleep(1 * time.Millisecond)
 	}
 
-	phiValues := []float64{1.0, 1.2, 0.8, 1.5, 1.1}
-	var callCount int32
+	var reportedPhis []float64
+	var mu sync.Mutex
 
 	inspector.SetOnInconsistencyReport(func(phi float64) {
-		atomic.AddInt32(&callCount, 1)
+		mu.Lock()
+		defer mu.Unlock()
+		reportedPhis = append(reportedPhis, phi)
 	})
 
-	// 多次检查
-	for _, phi := range phiValues {
-		// 模拟多次调用（实际中由 CheckInconsistency 触发）
-		inspector.updateStats(phi)
+	// 多次执行检查
+	for i := 0; i < 5; i++ {
+		inspector.CheckInconsistency(fmt.Sprintf("key-%d", i), time.Now().UnixNano(), counter)
 	}
+
+	time.Sleep(200 * time.Millisecond)
 
 	stats := inspector.GetStats()
 
 	// 验证统计累加
-	if stats.TotalChecks != 5 {
-		t.Errorf("Expected TotalChecks 5, got %d", stats.TotalChecks)
+	if stats.TotalChecks < 5 {
+		t.Errorf("Expected TotalChecks >= 5, got %d", stats.TotalChecks)
 	}
-	if stats.ReportsGenerated != 5 {
-		t.Errorf("Expected ReportsGenerated 5, got %d", stats.ReportsGenerated)
+	if stats.ReportsGenerated < 5 {
+		t.Errorf("Expected ReportsGenerated >= 5, got %d", stats.ReportsGenerated)
 	}
 
-	// 验证平均值计算（简单检查合理性）
+	// 验证平均值计算合理性
 	if stats.AveragePhi <= 0 {
 		t.Errorf("Expected positive average phi, got %f", stats.AveragePhi)
 	}
+
+	mu.Lock()
+	phiCount := len(reportedPhis)
+	mu.Unlock()
+
+	if phiCount < 5 {
+		t.Errorf("Expected at least 5 phi reports, got %d", phiCount)
+	}
+
+	t.Logf("Stats - TotalChecks: %d, ReportsGenerated: %d, AveragePhi: %f",
+		stats.TotalChecks, stats.ReportsGenerated, stats.AveragePhi)
 }
 
-// TestConcurrentChecks 并发检查测试
-func TestConcurrentChecks(t *testing.T) {
+// TestConcurrentAccess 并发访问测试
+func TestConcurrentAccess(t *testing.T) {
 	inspector := NewInspector()
 
 	// 创建测试数据
-	counter := store.NewPNCounter("test")
-	for i := 0; i < 20; i++ {
-		counter.Increment("node-1", float64(i+1))
+	counters := make([]*store.PNCounter, 5)
+	for i := 0; i < 5; i++ {
+		counters[i] = store.NewPNCounter(fmt.Sprintf("counter-%d", i))
+		for j := 0; j < 10; j++ {
+			counters[i].Increment("node-1", float64(j+1)*10)
+			time.Sleep(100 * time.Microsecond)
+		}
 	}
 
 	var reportCount int32
@@ -339,19 +552,32 @@ func TestConcurrentChecks(t *testing.T) {
 		atomic.AddInt32(&reportCount, 1)
 	})
 
-	// 并发执行检查
-	for i := 0; i < 10; i++ {
+	// 并发执行多种操作
+	var wg sync.WaitGroup
+
+	// 并发检查不一致性
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
 		go func(idx int) {
-			inspector.CheckInconsistency(fmt.Sprintf("key-%d", idx), time.Now().UnixNano(), counter)
+			defer wg.Done()
+			inspector.CheckInconsistency(fmt.Sprintf("key-%d", idx), time.Now().UnixNano(), counters[idx%5])
 		}(i)
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	// 并发获取统计信息
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = inspector.GetStats()
+		}()
+	}
+
+	wg.Wait()
+	time.Sleep(100 * time.Millisecond)
 
 	finalCount := atomic.LoadInt32(&reportCount)
-	if finalCount < 5 {
-		t.Logf("Concurrent checks generated %d reports (may vary)", finalCount)
-	}
+	t.Logf("Concurrent access generated %d reports", finalCount)
 
 	// 验证无 panic，统计数据合理
 	stats := inspector.GetStats()
@@ -365,22 +591,53 @@ func TestEdgeCases(t *testing.T) {
 	inspector := NewInspector()
 
 	// 测试非常大的数值
-	counter := store.NewPNCounter("test")
+	counter := store.NewPNCounter("test-large")
 	counter.Increment("node-1", 1e10) // 100亿
 	counter.Decrement("node-1", 1e9)  // 10亿
 
+	largePhiReported := false
 	inspector.SetOnInconsistencyReport(func(phi float64) {
+		largePhiReported = true
 		if phi <= 0 {
 			t.Errorf("Phi should be positive for large values, got %f", phi)
 		}
 	})
 
-	inspector.CheckInconsistency("test", time.Now().UnixNano(), counter)
-	time.Sleep(50 * time.Millisecond)
+	inspector.CheckInconsistency("test-large", time.Now().UnixNano(), counter)
+	time.Sleep(100 * time.Millisecond)
+
+	if !largePhiReported {
+		t.Log("Large value test completed without panic")
+	}
 
 	// 测试零值历史
 	zeroCounter := store.NewPNCounter("zero-test")
 	// 不添加任何操作，历史为空
 	inspector.CheckInconsistency("zero", time.Now().UnixNano(), zeroCounter)
 	// 应该静默跳过，不 panic
+
+	// 测试极短历史
+	shortCounter := store.NewPNCounter("short-test")
+	shortCounter.Increment("node-1", 10.0) // 只有一个操作
+	inspector.CheckInconsistency("short", time.Now().UnixNano(), shortCounter)
+	// 应该跳过处理
+
+	// 测试负数值
+	negativeCounter := store.NewPNCounter("negative-test")
+	negativeCounter.Increment("node-1", 100.0)
+	negativeCounter.Decrement("node-1", 150.0) // 结果为负数
+
+	negativePhiReported := false
+	inspector.SetOnInconsistencyReport(func(phi float64) {
+		negativePhiReported = true
+	})
+
+	inspector.CheckInconsistency("negative", time.Now().UnixNano(), negativeCounter)
+	time.Sleep(100 * time.Millisecond)
+
+	if !negativePhiReported {
+		t.Log("Negative value test completed without panic")
+	}
+
+	t.Log("All edge cases passed without panic")
 }

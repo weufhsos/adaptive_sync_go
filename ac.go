@@ -32,11 +32,12 @@ type Manager struct {
 	config *Config
 
 	// 核心组件
-	stores      map[string]*store.PNCounter // 状态存储
-	dispatcher  *dispatcher.Dispatcher      // 分发控制器
-	piInspector *pi.Inspector               // 性能检查模块
-	ocaCtrl     *oca.Controller             // 在线自适应控制器
-	grpcServer  *transport.GRPCServer       // gRPC服务端
+	stores      map[string]*store.PNCounter  // 状态存储
+	dispatcher  *dispatcher.Dispatcher       // 分发控制器
+	piInspector *pi.Inspector                // 性能检查模块
+	ocaCtrl     *oca.Controller              // 在线自适应控制器
+	grpcServer  *transport.GRPCServer        // gRPC服务端
+	connManager *transport.ConnectionManager // gRPC客户端连接管理器
 
 	// 同步原语
 	storeMutex  sync.RWMutex
@@ -143,6 +144,9 @@ func (m *Manager) initComponents() {
 	// 初始化gRPC服务端
 	m.grpcServer = transport.NewGRPCServer(m.config.GRPCPort)
 
+	// 初始化gRPC客户端连接管理器
+	m.connManager = transport.NewConnectionManager()
+
 	// 设置回调函数
 	m.setupCallbacks()
 }
@@ -186,6 +190,9 @@ func (m *Manager) Start() error {
 	// 注册gRPC服务处理器
 	m.registerGRPCHandlers()
 
+	// 连接到所有对等节点（延迟连接，等待其他节点启动）
+	go m.connectToPeers()
+
 	// 启动分发器
 	if err := m.dispatcher.Start(); err != nil {
 		return fmt.Errorf("failed to start dispatcher: %w", err)
@@ -215,6 +222,11 @@ func (m *Manager) Stop() {
 	m.piInspector.Stop()
 	m.dispatcher.Stop()
 	m.grpcServer.Stop()
+
+	// 关闭所有gRPC客户端连接
+	if m.connManager != nil {
+		m.connManager.CloseAll()
+	}
 
 	// 等待停止完成
 	<-m.stoppedChan
@@ -329,6 +341,16 @@ func (m *Manager) GetStats() *ManagerStats {
 	return &stats
 }
 
+// GetCurrentConsistencyLevel 获取当前一致性级别
+func (m *Manager) GetCurrentConsistencyLevel() dispatcher.ConsistencyLevel {
+	return m.dispatcher.GetCurrentConsistencyLevel()
+}
+
+// GetCurrentPhi 获取当前不一致性比率
+func (m *Manager) GetCurrentPhi() float64 {
+	return m.ocaCtrl.GetCurrentPhi()
+}
+
 // ========== 内部辅助方法 ==========
 
 // getOrCreateStore 获取或创建状态存储
@@ -393,4 +415,33 @@ func (m *Manager) logStats() {
 	log.Printf("[Manager] Dispatcher - Total:%d Success:%d Failed:%d Drops:%d",
 		dispatcherStats.TotalUpdates, dispatcherStats.SuccessfulSends,
 		dispatcherStats.FailedSends, dispatcherStats.QueueFullDrops)
+}
+
+// connectToPeers 连接到所有对等节点
+func (m *Manager) connectToPeers() {
+	// 等待一段时间让其他节点启动
+	time.Sleep(5 * time.Second)
+
+	log.Printf("[Manager] Connecting to %d peers...", len(m.config.PeerAddresses))
+
+	for _, peerAddr := range m.config.PeerAddresses {
+		// 尝试连接，失败则重试
+		for retries := 0; retries < 5; retries++ {
+			err := m.connManager.AddPeer(peerAddr)
+			if err != nil {
+				log.Printf("[Manager] Failed to connect to %s (attempt %d/5): %v", peerAddr, retries+1, err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			// 连接成功，获取客户端并添加到Dispatcher
+			if client, ok := m.connManager.GetClient(peerAddr); ok {
+				m.dispatcher.AddPeer(peerAddr, client.GetServiceClient())
+				log.Printf("[Manager] Successfully connected to peer: %s", peerAddr)
+			}
+			break
+		}
+	}
+
+	log.Printf("[Manager] Peer connection initialization completed")
 }

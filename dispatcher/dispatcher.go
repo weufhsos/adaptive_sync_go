@@ -106,7 +106,13 @@ func (d *Dispatcher) Start() error {
 func (d *Dispatcher) Stop() {
 	log.Printf("[Dispatcher] Stopping dispatcher for node %s", d.nodeID)
 
-	close(d.stopChan)
+	// 安全关闭 channel，避免重复关闭
+	select {
+	case <-d.stopChan:
+		// 已经关闭了
+	default:
+		close(d.stopChan)
+	}
 
 	// 等待停止完成
 	<-d.stoppedChan

@@ -128,6 +128,15 @@ message UpdateAck {
 实现论文中的 **PN-Counter**。使用 Go 的 Struct 和 Mutex。
 
 ```go
+// UpdateLog 记录每次更新的历史信息（含远程标记）
+type UpdateLog struct {
+    Timestamp int64     // 纳秒级时间戳
+    Value     float64   // 更新值
+    NodeID    string    // 节点ID
+    Operation Operation // 操作类型
+    IsRemote  bool      // 是否为远程更新（新增，用于PI模块区分本地/远程操作）
+}
+
 type PNCounter struct {
     sync.RWMutex
     Key       string
@@ -137,14 +146,55 @@ type PNCounter struct {
     LocalDecr float64
     // 历史日志，用于 PI 模块回溯计算
     History   []UpdateLog 
+    maxHistorySize int  // 最大历史记录数
 }
 
 // Merge 逻辑：合并来自远程的 map，取 Max 值
-func (pn *PNCounter) Merge(remoteIncr, remoteDecr map[string]float64) {
+// 同时记录远程更新到History（用于PI模块计算不一致性）
+func (pn *PNCounter) Merge(remoteIncr, remoteDecr map[string]float64, remoteNodeID string) {
     pn.Lock()
     defer pn.Unlock()
+    
     // CRDT Merge 核心：取各节点各维度的最大值
-    // ...实现代码...
+    for nodeID, remoteVal := range remoteIncr {
+        if localVal, exists := pn.Incr[nodeID]; !exists || remoteVal > localVal {
+            pn.Incr[nodeID] = remoteVal
+        }
+    }
+    for nodeID, remoteVal := range remoteDecr {
+        if localVal, exists := pn.Decr[nodeID]; !exists || remoteVal > localVal {
+            pn.Decr[nodeID] = remoteVal
+        }
+    }
+    
+    // 记录合并操作到历史（用于PI模块）
+    pn.recordMergeHistory(remoteIncr, remoteDecr, remoteNodeID)
+}
+
+// recordMergeHistory 记录远程更新的实际值和时间戳
+func (pn *PNCounter) recordMergeHistory(remoteIncr, remoteDecr map[string]float64, remoteNodeID string) {
+    now := time.Now().UnixNano()
+    
+    // 记录Incr更新
+    for nodeID, value := range remoteIncr {
+        if value > 0 {
+            log := UpdateLog{
+                Timestamp: now,
+                Value:     value,
+                NodeID:    nodeID,
+                Operation: Increment,
+                IsRemote:  true,  // 标记为远程更新
+            }
+            pn.History = append(pn.History, log)
+        }
+    }
+    
+    // 记录Decr更新...
+    // 维护历史记录大小，防止内存无限增长
+    if len(pn.History) > pn.maxHistorySize {
+        startIdx := len(pn.History) - pn.maxHistorySize
+        pn.History = pn.History[startIdx:]
+    }
 }
 
 // Query 逻辑
@@ -203,16 +253,52 @@ type ConsistencyLevel struct {
 利用 Go 的高性能计算能力。
 *   **触发时机**：当收到远程 gRPC 的 `UpdateMessage` 时，记录其 `timestamp`（记为 $t_{remote}$）。
 *   **数据源**：
-    1.  `PNCounter.History`: 包含本地所有操作的时间戳和值。
+    1.  `PNCounter.History`: 包含本地所有操作的时间戳和值（含 `IsRemote` 标记区分本地/远程操作）。
     2.  **InfluxDB** (适配点): 如果你的链路真实负载在 InfluxDB 中，这里可以查询 $t_{remote}$ 之前的真实流量数据作为 Ground Truth。
 *   **计算逻辑 (Algorithm 2)**：
     1.  **Replay (重放)**：在内存中构建两个临时时间序列。
-        *   序列 A (Observed): 此时此刻本地实际看到的历史（缺少该远程更新）。
-        *   序列 B (Optimal): 假设该远程更新在 $t_{remote}$ 准确到达时的历史。
+        *   序列 A (Observed): 只包含本地操作（`IsRemote=false`），模拟"如果远程更新没有延迟到达，本地会看到什么"。
+        *   序列 B (Optimal): 包含所有操作（本地+远程），模拟"如果所有更新都及时到达，理想状态是什么"。
     2.  **Apply Logic**: 模拟你的 SDN 业务逻辑（比如：选路算法）。
         *   基于序列 A，你会选哪条路？算出该路当时的负载标准差 $\sigma_u$。
         *   基于序列 B，你本该选哪条路？算出该路当时的负载标准差 $\sigma_o$。
     3.  **计算比率**: $\phi = \frac{\sum \sigma_u}{\sum \sigma_o}$。
+    4.  **边界处理**: 如果没有本地操作历史（observed=0），跳过此次检查（返回 `nil`）。
+
+#### 3.3.2 实现代码参考
+
+```go
+// reconstructTimelines 重构历史时间线
+func (i *Inspector) reconstructTimelines(history []store.UpdateLog, receiveTime int64) ([]float64, []float64) {
+    var observedValues []float64
+    var optimalValues []float64
+    hasLocalOperation := false
+    
+    for _, logEntry := range history {
+        value := logEntry.Value
+        if logEntry.Operation == store.Decrement {
+            value = -value
+        }
+        
+        // Observed: 只包含本地操作
+        if !logEntry.IsRemote {
+            currentObserved += value
+            observedValues = append(observedValues, currentObserved)
+            hasLocalOperation = true
+        }
+        
+        // Optimal: 包含所有操作
+        currentOptimal += value
+        optimalValues = append(optimalValues, currentOptimal)
+    }
+    
+    // 没有本地操作历史时返回nil
+    if !hasLocalOperation {
+        return nil, optimalValues
+    }
+    return observedValues, optimalValues
+}
+```
 
 ---
 
@@ -229,6 +315,9 @@ type OCAController struct {
     // PID 参数
     Kp, Ki, Kd float64
     TargetPhi  float64
+    
+    // 当前状态（新增）
+    CurrentPhi float64
 }
 
 // Run 周期性执行或事件触发
@@ -244,6 +333,9 @@ func (oca *OCAController) Adjust(newPhi float64) *ConsistencyLevel {
     
     return &newConsistencyLevel
 }
+
+// GetCurrentPhi 获取当前不一致性比率（新增）
+func (c *Controller) GetCurrentPhi() float64
 ```
 
 ---
@@ -352,6 +444,14 @@ func (m *Manager) HandleTopologyEvent(event TopologyEvent)
 
 // GetTopology 获取当前拓扑视图
 func (m *Manager) GetTopology() *Topology
+
+// ==================== 一致性监控（新增） ====================
+
+// GetCurrentConsistencyLevel 获取当前一致性级别（用于监控）
+func (m *Manager) GetCurrentConsistencyLevel() dispatcher.ConsistencyLevel
+
+// GetCurrentPhi 获取当前不一致性比率（用于监控）
+func (m *Manager) GetCurrentPhi() float64
 
 // ==================== 配置选项 ====================
 
@@ -603,11 +703,83 @@ $$ \Phi_T = \frac{\sum_{i=0}^{||T||} \sigma^{R_i}_u}{\sum_{i=0}^{||T||} \sigma^{
 
 ## 7. 实施路线图
 
-| 阶段 | 内容 | 预估周期 | 交付物 |
-|------|------|---------|--------|
-| Phase 1 | 基础数据结构与通信协议 | 1-2 周 | `proto/ac.proto`, `store/` |
-| Phase 2 | 一致性控制与分发 | 2-3 周 | `dispatcher/`, `ac.go` |
-| Phase 3 | 性能检查模块 | 1-2 周 | `pi/` |
-| Phase 4 | 在线自适应模块 | 1-2 周 | `oca/` |
-| Phase 5 | 库 API 封装与测试 | 1-2 周 | `ac.go`, `options.go`, 单元测试 |
-| Phase 6 | SDN 控制器集成测试 | 2-3 周 | 集成测试、性能基准测试 |
+### 7.1 AC协调层库开发
+
+| 阶段 | 内容 | 预估周期 | 交付物 | 状态 |
+|------|------|---------|--------|------|
+| Phase 1 | 基础数据结构与通信协议 | 1-2 周 | `proto/ac.proto`, `store/` | ✅ 已完成 |
+| Phase 2 | 一致性控制与分发 | 2-3 周 | `dispatcher/`, `ac.go` | ✅ 已完成 |
+| Phase 3 | 性能检查模块 | 1-2 周 | `pi/` | ✅ 已完成（含observed=0修复） |
+| Phase 4 | 在线自适应模块 | 1-2 周 | `oca/` | ✅ 已完成 |
+| Phase 5 | 库 API 封装与测试 | 1-2 周 | `ac.go`, `options.go`, 单元测试 | ✅ 已完成（含监控API扩展） |
+| Phase 6 | SDN 控制器集成测试 | 2-3 周 | 集成测试、性能基准测试 | 🔄 进行中 |
+
+### 7.2 仿真验证环境开发
+
+| 阶段 | 内容 | 关键改动 | 状态 |
+|------|------|---------|------|
+| Phase 1 | mock-SDN控制器 | 集成AC库、链路管理器、全局共享状态 | ✅ 已完成 |
+| Phase 2 | 负载生成器 | RPS降至5、同步发送模式、全局带宽分配 | ✅ 已完成 |
+| Phase 3 | 监控与可视化 | Prometheus指标扩展（ac_phi_value等） | ✅ 已完成 |
+| Phase 4 | 容器化编排 | docker-compose、健康检查、网络配置 | ✅ 已完成 |
+| Phase 5 | 实验验证 | 基准测试、突发负载、网络分区场景 | ⏳ 待执行 |
+
+---
+
+## 8. 仿真验证环境设计要点
+
+### 8.1 全局共享状态设计
+
+**问题**: 每个SDN节点默认只管理自己的链路状态（如 `link_sdn-1_to_sdn-2`），不同节点操作不同key，无法触发AC的不一致性检测。
+
+**解决**: 引入全局共享状态 `global_shared_bandwidth`。
+
+```go
+// LinkManager 添加全局状态支持
+type LinkManager struct {
+    links       map[string]*Link
+    acManager   *ac.Manager
+    
+    // 全局共享状态（所有节点共享同一个key）
+    globalStateKey string  // "global_shared_bandwidth"
+}
+
+// 初始化时设置全局容量
+globalCapacity := lm.capacity * float64(len(lm.links)+1)
+lm.acManager.Update(lm.globalStateKey, globalCapacity)
+```
+
+### 8.2 负载生成器调优
+
+**参数调整**（降低请求频率，增加持有时间）：
+| 参数 | 原值 | 新值 | 说明 |
+|------|------|------|------|
+| RPS | 50 | 5 | 降低请求频率 |
+| MAX_BANDWIDTH | 100 | 50 | 降低单请求带宽 |
+| MIN_HOLD_TIME | 1s | 5s | 增加持有时间 |
+| MAX_HOLD_TIME | 10s | 30s | 延长资源占用 |
+
+**发送模式**: 从异步goroutine改为同步发送，避免请求堆积。
+
+```go
+// 原代码（异步）
+go g.sendRequest(requestCount)
+
+// 修复后（同步）
+g.sendRequest(requestCount)
+```
+
+### 8.3 AC指标监控
+
+**新增Prometheus指标**:
+- `ac_phi_value` - 当前不一致性比率
+- `ac_consistency_level_qs` - 当前队列大小CL_QS
+- `ac_consistency_level_to` - 当前超时时间CL_TO(ms)
+- `ac_conflicts_total` - 冲突次数
+- `ac_sync_latency_ms` - 同步延迟
+
+### 8.4 已知限制
+
+1. **PI检查触发条件**: 需要多个节点对同一key有本地操作历史才能触发有效的不一致性检测
+2. **容器镜像缓存**: 修改代码后需使用 `--no-cache` 强制重新构建
+3. **构建上下文**: `build-context` 目录需要包含最新代码副本

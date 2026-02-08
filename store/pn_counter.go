@@ -11,6 +11,7 @@ type UpdateLog struct {
 	Value     float64   // 更新值
 	NodeID    string    // 节点ID
 	Operation Operation // 操作类型
+	IsRemote  bool      // 是否为远程更新（用于区分本地操作和远程同步）
 }
 
 // Operation 操作类型
@@ -191,20 +192,42 @@ func (pn *PNCounter) recordHistory(value float64, nodeID string, op Operation) {
 }
 
 // recordMergeHistory 记录合并操作到历史日志
+// 记录远程更新的实际值和原始时间戳，用于PI模块计算不一致性
 func (pn *PNCounter) recordMergeHistory(remoteIncr, remoteDecr map[string]float64, remoteNodeID string) {
-	// 记录合并事件本身
-	log := UpdateLog{
-		Timestamp: time.Now().UnixNano(),
-		Value:     0, // 合并操作不改变本地值
-		NodeID:    remoteNodeID,
-		Operation: -1, // 特殊标记表示合并操作
+	now := time.Now().UnixNano()
+
+	// 记录Incr更新
+	for nodeID, value := range remoteIncr {
+		if value > 0 {
+			log := UpdateLog{
+				Timestamp: now, // 使用接收时间作为时间戳
+				Value:     value,
+				NodeID:    nodeID, // 使用原始节点ID
+				Operation: Increment,
+				IsRemote:  true, // 标记为远程更新
+			}
+			pn.History = append(pn.History, log)
+		}
 	}
 
-	pn.History = append(pn.History, log)
+	// 记录Decr更新
+	for nodeID, value := range remoteDecr {
+		if value > 0 {
+			log := UpdateLog{
+				Timestamp: now,
+				Value:     value,
+				NodeID:    nodeID,
+				Operation: Decrement,
+				IsRemote:  true,
+			}
+			pn.History = append(pn.History, log)
+		}
+	}
 
 	// 维护历史记录大小
 	if len(pn.History) > pn.maxHistorySize {
-		pn.History = pn.History[1:]
+		startIdx := len(pn.History) - pn.maxHistorySize
+		pn.History = pn.History[startIdx:]
 	}
 }
 

@@ -2,6 +2,7 @@ package oca
 
 import (
 	"log"
+	"math"
 	"sync"
 	"time"
 
@@ -36,6 +37,8 @@ type Controller struct {
 	// 控制通道
 	stopChan    chan struct{}
 	stoppedChan chan struct{}
+	isStopped   bool       // 添加停止状态标志
+	stopMutex   sync.Mutex // 保护停止操作的互斥锁
 
 	// 统计信息
 	stats      *ControllerStats
@@ -88,9 +91,18 @@ func (c *Controller) Start() {
 
 // Stop 停止控制器
 func (c *Controller) Stop() {
+	c.stopMutex.Lock()
+	defer c.stopMutex.Unlock()
+
+	// 如果已经停止，直接返回
+	if c.isStopped {
+		return
+	}
+
 	log.Printf("[OCA] Stopping OCA Controller")
 	close(c.stopChan)
 	<-c.stoppedChan
+	c.isStopped = true
 	log.Printf("[OCA] OCA Controller stopped")
 }
 
@@ -156,12 +168,23 @@ func (c *Controller) calculatePID(phi float64) float64 {
 	c.integral += error * dt
 	iTerm := c.Ki * c.integral
 
-	// 微分项
-	dTerm := c.Kd * (error - c.lastError) / dt
+	// 微分项 - 添加保护防止极小时间间隔导致的数值不稳定
+	var dTerm float64
+	if dt > 0.0001 { // 只有当时间间隔足够大时才计算微分项
+		dTerm = c.Kd * (error - c.lastError) / dt
+	} else {
+		dTerm = 0 // 时间间隔太小时忽略微分项
+	}
 	c.lastError = error
 
 	// 总输出
 	output := pTerm + iTerm + dTerm
+
+	// 检查并处理NaN或Inf值
+	if math.IsNaN(output) || math.IsInf(output, 0) {
+		log.Printf("[OCA] Warning: PID output is invalid (NaN/Inf), using fallback value")
+		output = 0 // 使用默认值
+	}
 
 	// 输出限幅（防止过大调整）
 	if output > 100.0 {
@@ -229,6 +252,13 @@ func (c *Controller) GetStats() *ControllerStats {
 
 	stats := *c.stats
 	return &stats
+}
+
+// GetCurrentPhi 获取当前不一致性比率
+func (c *Controller) GetCurrentPhi() float64 {
+	c.statsMutex.RLock()
+	defer c.statsMutex.RUnlock()
+	return c.stats.CurrentPhi
 }
 
 // GetHistory 获取历史φ值

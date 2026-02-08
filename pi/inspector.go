@@ -70,8 +70,21 @@ func (i *Inspector) Stop() {
 	log.Printf("[PI] Performance Inspector stopped")
 }
 
+// RemoteUpdate 远程更新信息（用于不一致性检查）
+type RemoteUpdate struct {
+	Key          string
+	Value        float64
+	Operation    store.Operation
+	OriginTime   int64 // 远程更新的原始时间戳
+	ReceiveTime  int64 // 本地收到的时间戳
+	OriginNodeID string
+}
+
 // CheckInconsistency 当收到远程更新时触发不一致性检查
 // 实现论文Algorithm 2的核心逻辑
+// 参数:
+//   - remoteUpdate: 迟到的远程更新信息
+//   - localHistory: 本地操作历史
 func (i *Inspector) CheckInconsistency(key string, receiveTime int64, counter *store.PNCounter) {
 	// 获取历史记录
 	history := counter.GetHistory()
@@ -82,14 +95,25 @@ func (i *Inspector) CheckInconsistency(key string, receiveTime int64, counter *s
 	// 重构历史：生成两条时间线
 	observedTimeline, optimalTimeline := i.reconstructTimelines(history, receiveTime)
 
+	// 如果没有本地操作历史，跳过此次检查
+	// 这发生在：收到其他节点管理的链路更新，但本节点从未操作过该链路
+	if observedTimeline == nil {
+		log.Printf("[PI] Skipping inconsistency check for %s: no local operations", key)
+		return
+	}
+
 	// 模拟应用逻辑计算成本
 	observedCost := i.calculateCost(observedTimeline)
 	optimalCost := i.calculateCost(optimalTimeline)
 
 	// 计算不一致性比率 φ
+	// φ = σ_u / σ_o (实际成本 / 理想成本)
 	phi := 1.0
 	if optimalCost > 0 {
 		phi = observedCost / optimalCost
+	} else if observedCost > 0 {
+		// optimal=0 但 observed>0，说明有不一致性
+		phi = observedCost + 1.0
 	}
 
 	// 生成报告（可用于后续扩展）
@@ -113,6 +137,55 @@ func (i *Inspector) CheckInconsistency(key string, receiveTime int64, counter *s
 		key, phi, observedCost, optimalCost)
 }
 
+// CheckInconsistencyWithRemote 使用远程更新信息进行不一致性检查（完整实现）
+// 实现论文Algorithm 2的核心逻辑:
+//  1. Observed Timeline: 本地在收到远程更新之前的操作历史（不含迟到的远程更新）
+//  2. Optimal Timeline: 将远程更新按原始时间戳插入后的理想历史
+func (i *Inspector) CheckInconsistencyWithRemote(remoteUpdate *RemoteUpdate, localHistory []store.UpdateLog) {
+	if len(localHistory) < 1 {
+		return // 历史记录不足
+	}
+
+	// 重构历史：生成两条时间线
+	observedTimeline, optimalTimeline := i.reconstructTimelinesWithRemote(localHistory, remoteUpdate)
+
+	// 模拟应用逻辑计算成本
+	observedCost := i.calculateCost(observedTimeline)
+	optimalCost := i.calculateCost(optimalTimeline)
+
+	// 计算不一致性比率 φ
+	// φ = σ_u / σ_o (实际成本 / 理想成本)
+	phi := 1.0
+	if optimalCost > 0 {
+		phi = observedCost / optimalCost
+	}
+	// 如果 optimalCost 为 0 但 observedCost > 0，说明有偏差
+	if optimalCost == 0 && observedCost > 0 {
+		phi = observedCost + 1.0 // 表示有不一致性
+	}
+
+	// 生成报告
+	report := &InconsistencyReport{
+		Key:          remoteUpdate.Key,
+		Phi:          phi,
+		Timestamp:    time.Now(),
+		ObservedCost: observedCost,
+		OptimalCost:  optimalCost,
+	}
+	_ = report
+
+	// 更新统计
+	i.updateStats(phi)
+
+	// 调用回调函数（通常是OCA控制器）
+	if i.onReport != nil {
+		go i.onReport(phi)
+	}
+
+	log.Printf("[PI] Inconsistency check for %s: φ=%.4f (observed=%.2f, optimal=%.2f)",
+		remoteUpdate.Key, phi, observedCost, optimalCost)
+}
+
 // SetOnInconsistencyReport 设置不一致性报告回调
 func (i *Inspector) SetOnInconsistencyReport(callback func(float64)) {
 	i.onReport = callback
@@ -131,15 +204,19 @@ func (i *Inspector) GetStats() *InspectorStats {
 
 // reconstructTimelines 重构历史时间线（Algorithm 2的关键步骤）
 // 生成实际观察到的历史和理想历史
+// 
+// 核心逻辑：
+// - Observed Timeline: 只包含本地操作（在远程更新到达之前执行的操作）
+// - Optimal Timeline: 包含所有操作（假设远程更新及时到达）
+//
+// 注意：如果observedValues为空（没有本地操作历史），返回nil表示无法计算有效φ
 func (i *Inspector) reconstructTimelines(history []store.UpdateLog, receiveTime int64) ([]float64, []float64) {
 	var observedValues []float64
 	var optimalValues []float64
 
-	// 按时间戳排序历史记录
-	// （假设history已经是按时间排序的）
-
 	currentObserved := 0.0
 	currentOptimal := 0.0
+	hasLocalOperation := false
 
 	for _, logEntry := range history {
 		// 应用操作到当前值
@@ -148,12 +225,104 @@ func (i *Inspector) reconstructTimelines(history []store.UpdateLog, receiveTime 
 			value = -value
 		}
 
-		// Observed Timeline: 实际发生的历史（缺少延迟的更新）
-		currentObserved += value
-		observedValues = append(observedValues, currentObserved)
+		// Observed Timeline: 只包含本地操作（非远程更新）
+		// 这模拟了"如果远程更新没有延迟到达，本地会看到什么"
+		if !logEntry.IsRemote {
+			currentObserved += value
+			observedValues = append(observedValues, currentObserved)
+			hasLocalOperation = true
+		}
 
-		// Optimal Timeline: 理想历史（假设更新及时到达）
-		// 这里简化处理：假设所有更新都及时到达
+		// Optimal Timeline: 包含所有操作（本地+远程）
+		// 这模拟了"如果所有更新都及时到达，理想状态是什么"
+		currentOptimal += value
+		optimalValues = append(optimalValues, currentOptimal)
+	}
+
+	// 如果没有本地操作历史，返回nil表示无法计算有效φ
+	// 这种情况发生在：收到其他节点管理的链路更新，但本节点从未操作过该链路
+	if !hasLocalOperation {
+		return nil, optimalValues
+	}
+
+	return observedValues, optimalValues
+}
+
+// reconstructTimelinesWithRemote 使用远程更新信息重构历史时间线（完整实现）
+// 实现论文Algorithm 2的核心逻辑:
+//
+// 输入:
+//   - localHistory: 本地操作历史记录
+//   - remoteUpdate: 迟到的远程更新（触发器）
+//
+// 输出:
+//   - observedTimeline: 观察历史 S_{U_{incnst}} - 本地在收到远程更新之前的操作序列
+//   - optimalTimeline: 理想历史 S_{U_{cnst}} - 将远程更新按原始时间戳插入后的序列
+func (i *Inspector) reconstructTimelinesWithRemote(localHistory []store.UpdateLog, remoteUpdate *RemoteUpdate) ([]float64, []float64) {
+	var observedValues []float64
+	var optimalValues []float64
+
+	// ========== 1. 构建观察历史 (Observed Timeline) ==========
+	// 只包含本地在远程更新到达之前的操作
+	currentObserved := 0.0
+	for _, logEntry := range localHistory {
+		// 只包含在远程更新到达之前的本地操作
+		if logEntry.Timestamp < remoteUpdate.ReceiveTime {
+			value := logEntry.Value
+			if logEntry.Operation == store.Decrement {
+				value = -value
+			}
+			currentObserved += value
+			observedValues = append(observedValues, currentObserved)
+		}
+	}
+
+	// ========== 2. 构建理想历史 (Optimal Timeline) ==========
+	// 将远程更新按其原始时间戳插入到本地历史中
+
+	// 创建合并后的时间线
+	type timelineEntry struct {
+		Timestamp int64
+		Value     float64
+		Operation store.Operation
+	}
+
+	var mergedTimeline []timelineEntry
+
+	// 添加本地历史（只包含远程更新到达之前的操作）
+	for _, logEntry := range localHistory {
+		if logEntry.Timestamp < remoteUpdate.ReceiveTime {
+			mergedTimeline = append(mergedTimeline, timelineEntry{
+				Timestamp: logEntry.Timestamp,
+				Value:     logEntry.Value,
+				Operation: logEntry.Operation,
+			})
+		}
+	}
+
+	// 添加远程更新（使用其原始时间戳）
+	mergedTimeline = append(mergedTimeline, timelineEntry{
+		Timestamp: remoteUpdate.OriginTime, // 使用原始时间戳，而不是到达时间
+		Value:     remoteUpdate.Value,
+		Operation: remoteUpdate.Operation,
+	})
+
+	// 按时间戳排序
+	for i := 0; i < len(mergedTimeline)-1; i++ {
+		for j := i + 1; j < len(mergedTimeline); j++ {
+			if mergedTimeline[i].Timestamp > mergedTimeline[j].Timestamp {
+				mergedTimeline[i], mergedTimeline[j] = mergedTimeline[j], mergedTimeline[i]
+			}
+		}
+	}
+
+	// 计算理想时间线的值
+	currentOptimal := 0.0
+	for _, entry := range mergedTimeline {
+		value := entry.Value
+		if entry.Operation == store.Decrement {
+			value = -value
+		}
 		currentOptimal += value
 		optimalValues = append(optimalValues, currentOptimal)
 	}
