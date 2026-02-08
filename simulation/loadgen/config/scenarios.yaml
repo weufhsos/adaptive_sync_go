@@ -1,16 +1,16 @@
-# Go-SDN AC Simulation - Test Scenarios Configuration
+# Go-SDN AC Simulation - Test Scenarios Configuration (Server Load Scenario)
 
 scenarios:
   # 基准测试 - 正常负载
   baseline:
-    description: "Test AC under normal load conditions"
-    rps: 20                    # 降低请求频率，避免过载
+    description: "Test AC under normal server load conditions"
+    rps: 20
     duration: 300s
     pattern: uniform
-    min_bandwidth: 5           # 降低最小带宽需求
-    max_bandwidth: 50          # 降低最大带宽需求
-    min_hold_time: 500ms       # 缩短最小持有时间
-    max_hold_time: 3s          # 缩短最大持有时间
+    min_cost: 5              # 最小资源需求 5%
+    max_cost: 20             # 最大资源需求 20%
+    min_duration: 1s         # 最短持续时间
+    max_duration: 5s         # 最长持续时间
     expected:
       success_rate: ">95%"
       phi_range: "1.0-1.1"
@@ -18,7 +18,7 @@ scenarios:
 
   # 突发负载测试
   burst:
-    description: "Test AC adaptation to sudden load spikes"
+    description: "Test AC adaptation to sudden server load spikes"
     rps: 20
     duration: 600s
     pattern: burst
@@ -27,10 +27,10 @@ scenarios:
       peak_rps: 200
       burst_duration: 10s
       burst_interval: 30s
-    min_bandwidth: 20
-    max_bandwidth: 150
-    min_hold_time: 2s
-    max_hold_time: 15s
+    min_cost: 10
+    max_cost: 30
+    min_duration: 2s
+    max_duration: 10s
     expected:
       success_rate: ">80%"
       adaptation_time: "<5s"
@@ -38,28 +38,28 @@ scenarios:
 
   # 压力测试
   stress:
-    description: "Test AC under high load conditions"
-    rps: 200
+    description: "Test AC under high server load conditions"
+    rps: 100
     duration: 300s
     pattern: uniform
-    min_bandwidth: 5
-    max_bandwidth: 50
-    min_hold_time: 500ms
-    max_hold_time: 5s
+    min_cost: 5
+    max_cost: 25
+    min_duration: 500ms
+    max_duration: 3s
     expected:
       success_rate: ">70%"
       conflict_rate: "<5%"
 
   # 对比实验
   comparison:
-    description: "Compare AC vs non-AC performance"
-    rps: 100
+    description: "Compare AC vs non-AC performance in server load balancing"
+    rps: 50
     duration: 300s
     pattern: uniform
-    min_bandwidth: 10
-    max_bandwidth: 80
-    min_hold_time: 1s
-    max_hold_time: 8s
+    min_cost: 8
+    max_cost: 25
+    min_duration: 1s
+    max_duration: 6s
     runs:
       - name: "with_ac"
         ac_enabled: true
@@ -79,6 +79,6 @@ defaults:
     - sdn-3:8080
     - sdn-4:8080
     - sdn-5:8080
-  link_capacity: 1000
+  server_capacity: 100       # 每个服务器容量 100%
   target_phi: 1.05
   metrics_interval: 1s

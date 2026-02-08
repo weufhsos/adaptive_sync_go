@@ -39,13 +39,22 @@ func main() {
 	// 创建网络模拟器
 	netSim := simulator.NewNetworkSim(config.NodeID, config.LinkCapacity, config.Peers)
 
+	// 解析服务器配置
+	serverList := controller.ParseServerList(os.Getenv("SERVER_LIST"))
+	if len(serverList) == 0 {
+		serverCount := controller.ParseServerCount(os.Getenv("SERVER_COUNT"))
+		serverList = controller.GenerateServerList(serverCount)
+	}
+	serverCapacity := getEnvFloat("SERVER_CAPACITY", 100.0)
+
 	// 创建SDN控制器
 	ctrl, err := controller.NewSDNController(
 		config.NodeID,
 		config.GRPCPort,
 		config.Peers,
 		config.TargetPhi,
-		config.LinkCapacity,
+		serverCapacity, // 替代 linkCapacity
+		serverList,     // 新增参数
 		netSim,
 		metricsExporter,
 	)

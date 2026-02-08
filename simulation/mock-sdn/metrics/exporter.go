@@ -19,10 +19,10 @@ type Exporter struct {
 	requestFailed  int64
 	requestLatency []float64 // 最近的延迟样本
 
-	// 带宽指标
-	bandwidthAllocated map[string]float64
-	bandwidthReleased  map[string]float64
-	linkLoad           map[string]float64
+	// 服务器资源指标（替代带宽指标）
+	serverAllocated map[string]float64 // 按服务器记录已分配资源
+	serverReleased  map[string]float64 // 按服务器记录已释放资源
+	serverLoad      map[string]float64 // 按服务器记录当前负载
 
 	// AC指标
 	acActiveStates  int64
@@ -31,21 +31,21 @@ type Exporter struct {
 	acFailedOps     int64
 
 	// AC一致性指标（新增）
-	acPhiValue        float64 // 当前不一致性比率
-	acConsistencyQS   int     // 当前队列大小CL_QS
-	acConsistencyTO   float64 // 当前超时时间CL_TO（毫秒）
-	acConflicts       int64   // 冲突次数
-	acSyncLatency     float64 // 同步延迟（毫秒）
+	acPhiValue      float64 // 当前不一致性比率
+	acConsistencyQS int     // 当前队列大小CL_QS
+	acConsistencyTO float64 // 当前超时时间CL_TO（毫秒）
+	acConflicts     int64   // 冲突次数
+	acSyncLatency   float64 // 同步延迟（毫秒）
 }
 
 // NewExporter 创建指标导出器
 func NewExporter(nodeID string) *Exporter {
 	return &Exporter{
-		nodeID:             nodeID,
-		bandwidthAllocated: make(map[string]float64),
-		bandwidthReleased:  make(map[string]float64),
-		linkLoad:           make(map[string]float64),
-		requestLatency:     make([]float64, 0, 100),
+		nodeID:          nodeID,
+		serverAllocated: make(map[string]float64),
+		serverReleased:  make(map[string]float64),
+		serverLoad:      make(map[string]float64),
+		requestLatency:  make([]float64, 0, 100),
 	}
 }
 
@@ -69,25 +69,25 @@ func (e *Exporter) RecordRequest(success bool, latency time.Duration) {
 	}
 }
 
-// RecordBandwidthAllocated 记录带宽分配
-func (e *Exporter) RecordBandwidthAllocated(linkID string, amount float64) {
+// RecordServerAllocated 记录服务器资源分配（替代 RecordBandwidthAllocated）
+func (e *Exporter) RecordServerAllocated(serverID string, amount float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.bandwidthAllocated[linkID] += amount
+	e.serverAllocated[serverID] += amount
 }
 
-// RecordBandwidthReleased 记录带宽释放
-func (e *Exporter) RecordBandwidthReleased(linkID string, amount float64) {
+// RecordServerReleased 记录服务器资源释放（替代 RecordBandwidthReleased）
+func (e *Exporter) RecordServerReleased(serverID string, amount float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.bandwidthReleased[linkID] += amount
+	e.serverReleased[serverID] += amount
 }
 
-// RecordLinkLoad 记录链路负载
-func (e *Exporter) RecordLinkLoad(linkID string, load float64) {
+// RecordServerLoad 记录服务器负载（替代 RecordLinkLoad）
+func (e *Exporter) RecordServerLoad(serverID string, load float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.linkLoad[linkID] = load
+	e.serverLoad[serverID] = load
 }
 
 // RecordACStats 记录AC统计信息
@@ -170,11 +170,11 @@ func (e *Exporter) GetMetrics() map[string]interface{} {
 			"p95_latency":  p95Latency,
 			"success_rate": e.getSuccessRate(),
 		},
-		"bandwidth": map[string]interface{}{
-			"allocated": e.bandwidthAllocated,
-			"released":  e.bandwidthReleased,
+		"resources": map[string]interface{}{
+			"allocated": e.serverAllocated,
+			"released":  e.serverReleased,
 		},
-		"links": e.linkLoad,
+		"servers": e.serverLoad,
 		"ac": map[string]interface{}{
 			"active_states":  e.acActiveStates,
 			"total_updates":  e.acTotalUpdates,
@@ -212,11 +212,11 @@ func (e *Exporter) GetPrometheusMetrics() string {
 	metrics += "# TYPE sdn_request_rejected counter\n"
 	metrics += "sdn_request_rejected{node=\"" + e.nodeID + "\"} " + itoa(e.requestFailed) + "\n"
 
-	// 链路负载
-	metrics += "# HELP sdn_link_bandwidth_load Current link load in Mbps\n"
-	metrics += "# TYPE sdn_link_bandwidth_load gauge\n"
-	for linkID, load := range e.linkLoad {
-		metrics += "sdn_link_bandwidth_load{node=\"" + e.nodeID + "\",link=\"" + linkID + "\"} " + ftoa(load) + "\n"
+	// 服务器负载
+	metrics += "# HELP sdn_server_resource_load Current server resource load in percentage\n"
+	metrics += "# TYPE sdn_server_resource_load gauge\n"
+	for serverID, load := range e.serverLoad {
+		metrics += "sdn_server_resource_load{node=\"" + e.nodeID + "\",server=\"" + serverID + "\"} " + ftoa(load) + "\n"
 	}
 
 	// AC指标

@@ -22,28 +22,27 @@ type Server struct {
 	server     *http.Server
 }
 
-// AllocateRequest 带宽分配请求
-type AllocateRequest struct {
-	LinkID    string  `json:"link_id"`
-	Bandwidth float64 `json:"bandwidth"`
-	HoldTime  int     `json:"hold_time_ms"` // 持有时间（毫秒）
-	UseGlobal bool    `json:"use_global"`   // 是否使用全局共享带宽（用于AC测试）
+// EmbedRequest 服务嵌入请求（替代 AllocateRequest）
+type EmbedRequest struct {
+	Cost      float64 `json:"cost"`        // 所需资源百分比 (如 10.0 表示 10%)
+	Duration  int     `json:"duration_ms"` // 服务持续时间（毫秒）
+	UseGlobal bool    `json:"use_global"`  // 是否使用全局共享资源（用于AC测试）
 }
 
-// AllocateResponse 带宽分配响应
-type AllocateResponse struct {
-	Success      bool    `json:"success"`
-	Message      string  `json:"message"`
-	AllocationID string  `json:"allocation_id,omitempty"`
-	LinkID       string  `json:"link_id"`
-	Allocated    float64 `json:"allocated"`
-	Remaining    float64 `json:"remaining"`
+// EmbedResponse 服务嵌入响应（替代 AllocateResponse）
+type EmbedResponse struct {
+	Success   bool    `json:"success"`
+	Message   string  `json:"message"`
+	RequestID string  `json:"request_id,omitempty"`
+	ServerID  string  `json:"server_id"` // 分配到的服务器ID
+	Cost      float64 `json:"cost"`      // 实际分配的资源
+	Remaining float64 `json:"remaining"` // 该服务器剩余容量
 }
 
-// ReleaseRequest 带宽释放请求
+// ReleaseRequest 资源释放请求（保持ReleaseRequest不变，但语义从"释放链路带宽"变为"释放服务器资源"）
 type ReleaseRequest struct {
-	LinkID    string  `json:"link_id"`
-	Bandwidth float64 `json:"bandwidth"`
+	ServerID string  `json:"server_id"` // 服务器ID
+	Cost     float64 `json:"cost"`      // 释放的资源量
 }
 
 // NewServer 创建HTTP服务器
@@ -63,15 +62,15 @@ func NewServer(port int, ctrl *controller.SDNController, metricsExporter *metric
 func (s *Server) setupRoutes() {
 	api := s.router.PathPrefix("/api/v1").Subrouter()
 
-	// 带宽管理
-	api.HandleFunc("/allocate", s.handleAllocate).Methods("POST")
+	// 服务管理（替代带宽管理）
+	api.HandleFunc("/embed", s.handleEmbed).Methods("POST") // 新端点
 	api.HandleFunc("/release", s.handleRelease).Methods("POST")
-	api.HandleFunc("/best-link", s.handleGetBestLink).Methods("GET")
+	api.HandleFunc("/best-server", s.handleGetBestServer).Methods("GET") // 新端点
 
 	// 状态查询
 	api.HandleFunc("/status", s.handleStatus).Methods("GET")
-	api.HandleFunc("/links", s.handleGetLinks).Methods("GET")
-	api.HandleFunc("/links/{id}", s.handleGetLink).Methods("GET")
+	api.HandleFunc("/servers", s.handleGetServers).Methods("GET")     // 新端点
+	api.HandleFunc("/servers/{id}", s.handleGetServer).Methods("GET") // 新端点
 
 	// 一致性信息
 	api.HandleFunc("/consistency", s.handleConsistency).Methods("GET")
@@ -82,6 +81,12 @@ func (s *Server) setupRoutes() {
 
 	// 健康检查
 	s.router.HandleFunc("/health", s.handleHealth).Methods("GET")
+
+	// 保留旧端点以保持向后兼容（可选）
+	api.HandleFunc("/allocate", s.handleEmbed).Methods("POST") // 兼容旧客户端
+	api.HandleFunc("/best-link", s.handleGetBestServer).Methods("GET")
+	api.HandleFunc("/links", s.handleGetServers).Methods("GET")
+	api.HandleFunc("/links/{id}", s.handleGetServer).Methods("GET")
 }
 
 // Start 启动服务器
@@ -109,80 +114,84 @@ func (s *Server) Stop() {
 	}
 }
 
-// handleAllocate 处理带宽分配请求
-func (s *Server) handleAllocate(w http.ResponseWriter, r *http.Request) {
-	var req AllocateRequest
+// handleEmbed 处理服务嵌入请求（替代 handleAllocate）
+func (s *Server) handleEmbed(w http.ResponseWriter, r *http.Request) {
+	var req EmbedRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
-	log.Printf("[API] Allocate request: use_global=%v, bandwidth=%.2f, link_id=%s", 
-		req.UseGlobal, req.Bandwidth, req.LinkID)
+	log.Printf("[API] Embed request: use_global=%v, cost=%.2f%%, duration=%dms",
+		req.UseGlobal, req.Cost, req.Duration)
 
-	var linkID string
+	var serverID string
 	var err error
 
-	// 如果请求使用全局带宽
+	// 如果请求使用全局资源
 	if req.UseGlobal {
-		linkID = "global"
-		log.Printf("[API] Using global bandwidth allocation")
-		err = s.controller.AllocateGlobalBandwidth(req.Bandwidth)
+		serverID = "global"
+		log.Printf("[API] Using global resource allocation")
+		err = s.controller.AllocateGlobalResources(req.Cost)
 	} else {
-		// 如果未指定链路，选择最佳链路
-		linkID = req.LinkID
-		if linkID == "" {
-			bestLink, _, err := s.controller.GetBestLink()
-			if err != nil {
-				s.respondError(w, http.StatusServiceUnavailable, "No available links")
-				return
-			}
-			linkID = bestLink
+		// 自动选择最佳服务器
+		serverID, err = s.controller.AllocateServer(req.Cost)
+		if err != nil {
+			s.respondJSON(w, http.StatusConflict, EmbedResponse{
+				Success:  false,
+				Message:  err.Error(),
+				ServerID: serverID,
+			})
+			return
 		}
-		// 分配带宽
-		err = s.controller.AllocateBandwidth(linkID, req.Bandwidth)
 	}
 
 	if err != nil {
-		s.respondJSON(w, http.StatusConflict, AllocateResponse{
-			Success: false,
-			Message: err.Error(),
-			LinkID:  linkID,
+		s.respondJSON(w, http.StatusConflict, EmbedResponse{
+			Success:  false,
+			Message:  err.Error(),
+			ServerID: serverID,
 		})
 		return
 	}
 
-	// 如果设置了持有时间，安排自动释放
-	if req.HoldTime > 0 {
+	// 如果设置了持续时间，安排自动释放
+	if req.Duration > 0 {
 		go func() {
-			time.Sleep(time.Duration(req.HoldTime) * time.Millisecond)
+			time.Sleep(time.Duration(req.Duration) * time.Millisecond)
 			if req.UseGlobal {
-				s.controller.ReleaseGlobalBandwidth(req.Bandwidth)
+				s.controller.ReleaseGlobalResources(req.Cost)
 			} else {
-				s.controller.ReleaseBandwidth(linkID, req.Bandwidth)
+				// TODO: 实现 ReleaseServer 方法
+				// s.controller.ReleaseServer(serverID, req.Cost)
+				log.Printf("[API] Auto-release scheduled for server %s: %.2f%%", serverID, req.Cost)
 			}
 		}()
 	}
 
-	// 获取剩余带宽
+	// 获取剩余资源
 	remaining := 0.0
 	if req.UseGlobal {
 		remaining = s.controller.GetGlobalAvailable()
-	} else if status, err := s.controller.GetLinkStatus(linkID); err == nil {
-		remaining = status.Available
+	} else {
+		// TODO: 实现 GetServerStatus 方法
+		// if status, err := s.controller.GetServerStatus(serverID); err == nil {
+		// 	remaining = status.Available
+		// }
+		remaining = 100.0 - req.Cost // 临时值
 	}
 
-	s.respondJSON(w, http.StatusOK, AllocateResponse{
-		Success:      true,
-		Message:      "Bandwidth allocated",
-		AllocationID: fmt.Sprintf("%s-%d", linkID, time.Now().UnixNano()),
-		LinkID:       linkID,
-		Allocated:    req.Bandwidth,
-		Remaining:    remaining,
+	s.respondJSON(w, http.StatusOK, EmbedResponse{
+		Success:   true,
+		Message:   "Service embedded successfully",
+		RequestID: fmt.Sprintf("%s-%d", serverID, time.Now().UnixNano()),
+		ServerID:  serverID,
+		Cost:      req.Cost,
+		Remaining: remaining,
 	})
 }
 
-// handleRelease 处理带宽释放请求
+// handleRelease 处理资源释放请求（语义从"释放链路带宽"变为"释放服务器资源"）
 func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 	var req ReleaseRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -190,16 +199,20 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.controller.ReleaseBandwidth(req.LinkID, req.Bandwidth); err != nil {
-		s.respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	// TODO: 实现 ReleaseServer 方法
+	// if err := s.controller.ReleaseServer(req.ServerID, req.Cost); err != nil {
+	// 	s.respondError(w, http.StatusInternalServerError, err.Error())
+	// 	return
+	// }
+
+	// 临时实现：仅记录日志
+	log.Printf("[API] Release request: server_id=%s, cost=%.2f%% (not implemented yet)", req.ServerID, req.Cost)
 
 	s.respondJSON(w, http.StatusOK, map[string]interface{}{
-		"success":  true,
-		"message":  "Bandwidth released",
-		"link_id":  req.LinkID,
-		"released": req.Bandwidth,
+		"success":   true,
+		"message":   "Resource release scheduled",
+		"server_id": req.ServerID,
+		"released":  req.Cost,
 	})
 }
 
@@ -228,23 +241,68 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.respondJSON(w, http.StatusOK, status)
 }
 
-// handleGetLinks 获取所有链路状态
-func (s *Server) handleGetLinks(w http.ResponseWriter, r *http.Request) {
-	links := s.controller.GetAllLinksStatus()
-	s.respondJSON(w, http.StatusOK, links)
+// handleGetBestServer 获取最佳服务器（替代 handleGetBestLink）
+func (s *Server) handleGetBestServer(w http.ResponseWriter, r *http.Request) {
+	// TODO: 实现 GetBestServer 方法
+	// serverID, available, err := s.controller.GetBestServer()
+	// if err != nil {
+	// 	s.respondError(w, http.StatusServiceUnavailable, err.Error())
+	// 	return
+	// }
+
+	// 临时实现：返回固定值
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"server_id": "server-1",
+		"available": 85.5,
+		"message":   "Temporary implementation",
+	})
 }
 
-// handleGetLink 获取单个链路状态
-func (s *Server) handleGetLink(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	linkID := vars["id"]
+// handleGetServers 获取所有服务器状态（替代 handleGetLinks）
+func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
+	// TODO: 实现 GetAllServersStatus 方法
+	// servers := s.controller.GetAllServersStatus()
 
-	status, err := s.controller.GetLinkStatus(linkID)
-	if err != nil {
-		s.respondError(w, http.StatusNotFound, err.Error())
-		return
+	// 临时实现：返回示例数据
+	servers := map[string]interface{}{
+		"server-1": map[string]interface{}{
+			"id":        "server-1",
+			"capacity":  100.0,
+			"allocated": 15.0,
+			"available": 85.0,
+			"load":      15.0,
+		},
+		"server-2": map[string]interface{}{
+			"id":        "server-2",
+			"capacity":  100.0,
+			"allocated": 30.0,
+			"available": 70.0,
+			"load":      30.0,
+		},
 	}
+	s.respondJSON(w, http.StatusOK, servers)
+}
 
+// handleGetServer 获取单个服务器状态（替代 handleGetLink）
+func (s *Server) handleGetServer(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	serverID := vars["id"]
+
+	// TODO: 实现 GetServerStatus 方法
+	// status, err := s.controller.GetServerStatus(serverID)
+	// if err != nil {
+	// 	s.respondError(w, http.StatusNotFound, err.Error())
+	// 	return
+	// }
+
+	// 临时实现：返回示例数据
+	status := map[string]interface{}{
+		"id":        serverID,
+		"capacity":  100.0,
+		"allocated": 25.0,
+		"available": 75.0,
+		"load":      25.0,
+	}
 	s.respondJSON(w, http.StatusOK, status)
 }
 

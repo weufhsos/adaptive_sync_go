@@ -13,7 +13,8 @@ services:
       - HTTP_PORT=8080
       - PEERS=sdn-2:50051,sdn-3:50051,sdn-4:50051,sdn-5:50051
       - TARGET_PHI=1.05
-      - LINK_CAPACITY=1000
+      - SERVER_LIST=server-1,server-2,server-3,server-4,server-5
+      - SERVER_CAPACITY=100
     ports:
       - "8081:8080"
       - "50051:50051"
@@ -36,7 +37,8 @@ services:
       - HTTP_PORT=8080
       - PEERS=sdn-1:50051,sdn-3:50051,sdn-4:50051,sdn-5:50051
       - TARGET_PHI=1.05
-      - LINK_CAPACITY=1000
+      - SERVER_LIST=server-1,server-2,server-3,server-4,server-5
+      - SERVER_CAPACITY=100
     ports:
       - "8082:8080"
     networks:
@@ -58,7 +60,8 @@ services:
       - HTTP_PORT=8080
       - PEERS=sdn-1:50051,sdn-2:50051,sdn-4:50051,sdn-5:50051
       - TARGET_PHI=1.05
-      - LINK_CAPACITY=1000
+      - SERVER_LIST=server-1,server-2,server-3,server-4,server-5
+      - SERVER_CAPACITY=100
     ports:
       - "8083:8080"
     networks:
@@ -80,7 +83,8 @@ services:
       - HTTP_PORT=8080
       - PEERS=sdn-1:50051,sdn-2:50051,sdn-3:50051,sdn-5:50051
       - TARGET_PHI=1.05
-      - LINK_CAPACITY=1000
+      - SERVER_LIST=server-1,server-2,server-3,server-4,server-5
+      - SERVER_CAPACITY=100
     ports:
       - "8084:8080"
     networks:
@@ -102,7 +106,8 @@ services:
       - HTTP_PORT=8080
       - PEERS=sdn-1:50051,sdn-2:50051,sdn-3:50051,sdn-4:50051
       - TARGET_PHI=1.05
-      - LINK_CAPACITY=1000
+      - SERVER_LIST=server-1,server-2,server-3,server-4,server-5
+      - SERVER_CAPACITY=100
     ports:
       - "8085:8080"
     networks:
@@ -124,10 +129,10 @@ services:
       - RPS=5
       - DURATION=300s
       - PATTERN=uniform
-      - MIN_BANDWIDTH=10
-      - MAX_BANDWIDTH=50
-      - MIN_HOLD_TIME=5s
-      - MAX_HOLD_TIME=30s
+      - MIN_COST=5        # 最小资源需求 5%
+      - MAX_COST=20       # 最大资源需求 20%
+      - MIN_DURATION=1s   # 最短持有时间
+      - MAX_DURATION=5s   # 最长持有时间
     depends_on:
       sdn-1:
         condition: service_healthy
