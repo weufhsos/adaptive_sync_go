@@ -30,6 +30,8 @@ func main() {
 	config := loadConfig()
 	log.Printf("[LoadGen] Config: Targets=%v, RPS=%.1f, Duration=%v, Pattern=%s",
 		config.TargetNodes, config.RPS, config.Duration, config.Pattern)
+	log.Printf("[LoadGen] Bandwidth Range: %.2f - %.2f, HoldTime: %v - %v",
+		config.MinBandwidth, config.MaxBandwidth, config.MinHoldTime, config.MaxHoldTime)
 
 	// 创建请求生成器
 	gen := generator.NewRequestGenerator(

@@ -186,8 +186,10 @@ func TestReconstructTimelines(t *testing.T) {
 
 // TestReconstructTimelinesWithRemote 完整版本的时间线重构测试
 // 测试论文 Algorithm 2 的核心逻辑:
-//   - Observed Timeline: 本地在收到远程更新之前的操作历史
-//   - Optimal Timeline: 将远程更新按原始时间戳插入后的理想历史
+//   - Suboptimal Timeline (S_{U_{incnst}}): 本地所有历史操作 + 远端更新（实际发生的）
+//   - Optimal Timeline (S_{U_{cnst}}): 时间戳 < T_remote 的本地更新 + 远端更新 + 后续修正操作
+//
+// 注意: 根据论文，φ = σ_u / σ_o 应该 >= 1，因为次优决策成本不会低于最优决策
 func TestReconstructTimelinesWithRemote(t *testing.T) {
 	inspector := NewInspector()
 
@@ -213,28 +215,33 @@ func TestReconstructTimelinesWithRemote(t *testing.T) {
 		OriginNodeID: "remote",
 	}
 
-	observed, optimal := inspector.reconstructTimelinesWithRemote(localHistory, remoteUpdate)
+	suboptimal, optimal := inspector.reconstructTimelinesWithRemote(localHistory, remoteUpdate)
 
-	// ========== 验证 Observed Timeline ==========
-	// 应该只包含 T < 1005 的本地操作，不含远程更新
-	// 期望序列: 100 -> 80 -> 70
-	expectedObserved := []float64{100.0, 80.0, 70.0}
+	// ========== 验证 Suboptimal Timeline (S_{U_{incnst}}) ==========
+	// 根据论文 Algorithm 2 步骤6: S_{U_{incnst}} ← S_{CtrU_k} ∪ U_{Ctrk}^{remote}
+	// 包含所有本地操作 + 远端更新
+	// 序列: 100 (T=1000) -> 80 (T=1002) -> 70 (T=1004) -> 40 (加入远端-30)
+	expectedSuboptimal := []float64{100.0, 80.0, 70.0, 40.0}
 
-	if len(observed) != len(expectedObserved) {
-		t.Errorf("Observed timeline length: expected %d, got %d", len(expectedObserved), len(observed))
+	if len(suboptimal) != len(expectedSuboptimal) {
+		t.Errorf("Suboptimal timeline length: expected %d, got %d", len(expectedSuboptimal), len(suboptimal))
 	} else {
-		for i, exp := range expectedObserved {
-			if observed[i] != exp {
-				t.Errorf("Observed[%d]: expected %.1f, got %.1f", i, exp, observed[i])
+		for i, exp := range expectedSuboptimal {
+			if suboptimal[i] != exp {
+				t.Errorf("Suboptimal[%d]: expected %.1f, got %.1f", i, exp, suboptimal[i])
 			}
 		}
 	}
 
-	// ========== 验证 Optimal Timeline ==========
-	// 应该将远程更新按原始时间戳(T=1001)插入
-	// 时间序列: T=1000 -> T=1001 -> T=1002 -> T=1004
-	// 值序列: 100 -> 70 -> 50 -> 40
-	expectedOptimal := []float64{100.0, 70.0, 50.0, 40.0}
+	// ========== 验证 Optimal Timeline (S_{U_{cnst}}) ==========
+	// 根据论文 Algorithm 2:
+	// 步骤2: 时间戳 < T_remote (1001) 的本地更新: T=1000 (+100)
+	// 步骤5: 加入远端更新: T=1001 (-30)
+	// 步骤3-4: 时间戳 >= T_remote 的本地操作重新决策
+	//   - T=1002 (-20): 最优决策将部分请求重定向，S1 只获得 70% = -14
+	//   - T=1004 (-10): 同理，S1 获得 70% = -7
+	// 最终序列: 100 -> 70 -> 56 -> 49
+	expectedOptimal := []float64{100.0, 70.0, 56.0, 49.0}
 
 	if len(optimal) != len(expectedOptimal) {
 		t.Errorf("Optimal timeline length: expected %d, got %d", len(expectedOptimal), len(optimal))
@@ -246,8 +253,11 @@ func TestReconstructTimelinesWithRemote(t *testing.T) {
 		}
 	}
 
-	t.Logf("Observed Timeline: %v", observed)
-	t.Logf("Optimal Timeline: %v", optimal)
+	t.Logf("Suboptimal Timeline (S_{U_{incnst}}): %v", suboptimal)
+	t.Logf("Optimal Timeline (S_{U_{cnst}}): %v", optimal)
+	
+	// 验证: 在这个特定场景中，由于所有操作都是递减，两种时间线最终相同
+	// 但在真实负载均衡场景中，最优决策会改变操作目标，导致不同的时间线
 }
 
 // TestReconstructTimelinesWithRemote_EarlyRemote 测试远程更新在时间线开头的情况
@@ -270,16 +280,24 @@ func TestReconstructTimelinesWithRemote_EarlyRemote(t *testing.T) {
 		OriginNodeID: "remote",
 	}
 
-	observed, optimal := inspector.reconstructTimelinesWithRemote(localHistory, remoteUpdate)
+	suboptimal, optimal := inspector.reconstructTimelinesWithRemote(localHistory, remoteUpdate)
 
-	// Observed: 只有本地操作 (50, 60)
-	expectedObserved := []float64{50.0, 60.0}
-	if len(observed) != len(expectedObserved) {
-		t.Errorf("Observed length mismatch: expected %d, got %d", len(expectedObserved), len(observed))
+	// Suboptimal (S_{U_{incnst}}): 本地操作 + 远端更新
+	// 序列: 50 (T=1002) -> 60 (T=1004) -> 160 (加入远端+100)
+	expectedSuboptimal := []float64{50.0, 60.0, 160.0}
+	if len(suboptimal) != len(expectedSuboptimal) {
+		t.Errorf("Suboptimal length mismatch: expected %d, got %d", len(expectedSuboptimal), len(suboptimal))
+	} else {
+		for i, exp := range expectedSuboptimal {
+			if suboptimal[i] != exp {
+				t.Errorf("Suboptimal[%d]: expected %.1f, got %.1f", i, exp, suboptimal[i])
+			}
+		}
 	}
 
-	// Optimal: 远程更新应该在最前面 (100, 150, 160)
-	expectedOptimal := []float64{100.0, 150.0, 160.0}
+	// Optimal (S_{U_{cnst}}): 远端更新在最前面 + 重新决策后的本地操作
+	// 序列: 100 (T=1000, 远端+100) -> 135 (T=1002, 本地+50*0.7) -> 142 (T=1004, 本地+10*0.7)
+	expectedOptimal := []float64{100.0, 135.0, 142.0}
 	if len(optimal) != len(expectedOptimal) {
 		t.Errorf("Optimal length mismatch: expected %d, got %d", len(expectedOptimal), len(optimal))
 	} else {
@@ -290,7 +308,7 @@ func TestReconstructTimelinesWithRemote_EarlyRemote(t *testing.T) {
 		}
 	}
 
-	t.Logf("Early remote - Observed: %v, Optimal: %v", observed, optimal)
+	t.Logf("Early remote - Suboptimal: %v, Optimal: %v", suboptimal, optimal)
 }
 
 // TestCheckInconsistencyWithRemote 测试完整的不一致性检查流程
@@ -322,13 +340,13 @@ func TestCheckInconsistencyWithRemote(t *testing.T) {
 	// 等待回调被调用
 	time.Sleep(100 * time.Millisecond)
 
-	// phi 应该大于 0（有效值）
-	// 注意: φ = observed_cost / optimal_cost
-	// - φ ≈ 1.0: 无明显不一致性
-	// - φ > 1.0: 实际成本高于理想成本
-	// - φ < 1.0: 实际成本低于理想成本（远程更新导致理想历史波动更大）
-	if reportedPhi <= 0 {
-		t.Errorf("Expected phi > 0, got %f", reportedPhi)
+	// phi 应该 >= 1（根据论文定义）
+	// 注意: φ = σ_u / σ_o (次优成本 / 最优成本)
+	// - φ = 1.0: 无偏差，实际决策与理想决策一致
+	// - φ > 1.0: 有次优偏差，实际成本高于理想成本
+	// 根据论文，φ 不应该 < 1，因为次优决策的成本不会低于最优决策
+	if reportedPhi < 1.0 {
+		t.Errorf("Expected phi >= 1.0 according to paper, got %f", reportedPhi)
 	}
 
 	stats := inspector.GetStats()
@@ -640,4 +658,122 @@ func TestEdgeCases(t *testing.T) {
 	}
 
 	t.Log("All edge cases passed without panic")
+}
+
+// TestPhi_GreaterThanOne 验证 φ > 1 的情况
+// 根据论文，当次优决策导致更高的成本时，φ 应该 > 1
+func TestPhi_GreaterThanOne(t *testing.T) {
+	inspector := NewInspector()
+
+	// 构造一个会产生次优偏差的场景
+	// 场景: 负载均衡器中，由于状态同步延迟导致的决策偏差
+	//
+	// 本地历史: 在不知道远端已分配资源的情况下，继续给同一服务器分配
+	// 这会导致该服务器负载过高，产生更大的负载不均衡（高方差）
+	localHistory := []store.UpdateLog{
+		{Timestamp: 1000, Value: 100.0, NodeID: "local", Operation: store.Increment}, // 初始负载 100
+		{Timestamp: 1003, Value: 50.0, NodeID: "local", Operation: store.Increment},  // 本地继续分配 +50
+		{Timestamp: 1005, Value: 30.0, NodeID: "local", Operation: store.Increment},  // 本地继续分配 +30
+	}
+
+	// 远端更新: 在 T=1001 时刻给同一服务器分配了 80
+	// 但由于延迟，在 T=1006 才到达本地
+	remoteUpdate := &RemoteUpdate{
+		Key:          "server_load",
+		Value:        80.0,
+		Operation:    store.Increment,
+		OriginTime:   1001, // 在本地第二条操作之前
+		ReceiveTime:  1006,
+		OriginNodeID: "remote",
+	}
+
+	var reportedPhi float64
+	inspector.SetOnInconsistencyReport(func(phi float64) {
+		reportedPhi = phi
+		t.Logf("Reported phi: %.4f", phi)
+	})
+
+	inspector.CheckInconsistencyWithRemote(remoteUpdate, localHistory)
+	time.Sleep(100 * time.Millisecond)
+
+	// 验证 phi >= 1（根据论文定义）
+	if reportedPhi < 1.0 {
+		t.Errorf("Expected phi >= 1.0 according to paper, got %f", reportedPhi)
+	}
+
+	t.Logf("φ = %.4f (expected >= 1.0)", reportedPhi)
+}
+
+// TestPhi_PaperCompliance 验证算法实现符合论文定义
+// 论文定义: φ = σ_u / σ_o，其中 σ_u 是次优成本，σ_o 是最优成本
+// 由于次优决策的成本不会低于最优决策，φ 应该始终 >= 1
+func TestPhi_PaperCompliance(t *testing.T) {
+	inspector := NewInspector()
+
+	testCases := []struct {
+		name     string
+		history  []store.UpdateLog
+		remote   *RemoteUpdate
+		minPhi   float64 // 最小期望 phi 值
+		maxPhi   float64 // 最大期望 phi 值（防止无限大）
+	}{
+		{
+			name: "标准场景",
+			history: []store.UpdateLog{
+				{Timestamp: 1000, Value: 100.0, NodeID: "local", Operation: store.Increment},
+				{Timestamp: 1003, Value: 20.0, NodeID: "local", Operation: store.Decrement},
+			},
+			remote: &RemoteUpdate{
+				Key:          "test",
+				Value:        30.0,
+				Operation:    store.Decrement,
+				OriginTime:   1001,
+				ReceiveTime:  1005,
+				OriginNodeID: "remote",
+			},
+			minPhi: 1.0,
+			maxPhi: 10.0,
+		},
+		{
+			name: "远端更新在开头",
+			history: []store.UpdateLog{
+				{Timestamp: 1002, Value: 50.0, NodeID: "local", Operation: store.Increment},
+				{Timestamp: 1004, Value: 10.0, NodeID: "local", Operation: store.Increment},
+			},
+			remote: &RemoteUpdate{
+				Key:          "test",
+				Value:        100.0,
+				Operation:    store.Increment,
+				OriginTime:   1000,
+				ReceiveTime:  1005,
+				OriginNodeID: "remote",
+			},
+			minPhi: 1.0,
+			maxPhi: 20.0, // 允许更大的值，因为远端更新在开头会导致显著的次优偏差
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var reportedPhi float64
+			inspector.SetOnInconsistencyReport(func(phi float64) {
+				reportedPhi = phi
+			})
+
+			inspector.CheckInconsistencyWithRemote(tc.remote, tc.history)
+			time.Sleep(50 * time.Millisecond)
+
+			// 验证 phi >= 1.0（论文定义）
+			if reportedPhi < tc.minPhi {
+				t.Errorf("Expected phi >= %f, got %f", tc.minPhi, reportedPhi)
+			}
+
+			// 验证 phi 在合理范围内
+			if reportedPhi > tc.maxPhi {
+				t.Errorf("Expected phi <= %f, got %f (possible calculation error)", tc.maxPhi, reportedPhi)
+			}
+
+			t.Logf("Test '%s': φ = %.4f", tc.name, reportedPhi)
+		})
+	}
 }

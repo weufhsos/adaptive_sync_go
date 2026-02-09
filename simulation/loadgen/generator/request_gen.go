@@ -186,10 +186,17 @@ func (g *RequestGenerator) sendRequest(id int) {
 		Bandwidth:  bandwidth,
 	}
 
+	// DEBUG: 打印配置值
+	log.Printf("[LoadGen] DEBUG: minBandwidth=%.2f, maxBandwidth=%.2f, generated bandwidth=%.2f",
+		g.minBandwidth, g.maxBandwidth, bandwidth)
+
 	// 发送请求（使用全局资源模式，确保所有节点操作同一个AC key）
 	startTime := time.Now()
 	cost := bandwidth // 使用bandwidth作为cost值
 	durationMs := holdTime.Milliseconds()
+	
+	// DEBUG: 确认cost值
+	log.Printf("[LoadGen] DEBUG: cost=%.2f, durationMs=%d", cost, durationMs)
 	embedReq := map[string]interface{}{
 		"cost":         cost,
 		"duration_ms":  durationMs,

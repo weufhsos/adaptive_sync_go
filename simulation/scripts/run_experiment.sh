@@ -17,7 +17,7 @@ echo "=========================================="
 case $SCENARIO in
     baseline)
         echo "Baseline test - Normal load"
-        export RPS=50
+        export RPS=5
         export DURATION=300s
         export PATTERN=uniform
         ;;
